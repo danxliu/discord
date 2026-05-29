@@ -1,7 +1,7 @@
 services:
   bot:
     build: .
-    container_name: discord_bot
+    container_name: discord-bot
     restart: unless-stopped
     env_file:
       - .env
