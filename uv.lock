@@ -265,6 +265,7 @@ name = "discord"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "discord-py" },
     { name = "python-dotenv" },
     { name = "requests" },
@@ -272,6 +273,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp" },
     { name = "discord-py" },
     { name = "python-dotenv" },
     { name = "requests" },
