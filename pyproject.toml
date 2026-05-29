@@ -6,8 +6,8 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "discord.py",
-    "python-dotenv",
     "requests",
     "aiohttp",
     "pydantic",
+    "pydantic-settings",
 ]

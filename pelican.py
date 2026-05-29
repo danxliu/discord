@@ -1,6 +1,8 @@
 import aiohttp
 from pydantic import BaseModel
 
+from config import settings
+
 
 class ServerInfo(BaseModel):
     name: str
@@ -15,17 +17,17 @@ class ServerStats(BaseModel):
     disk: str
 
 
-async def get_servers(app_key, base_url):
+async def get_servers():
     """
     Fetches the list of servers from the Pelican Application API.
     Raises an Exception if the request fails.
     """
     headers = {
-        "Authorization": f"Bearer {app_key}",
+        "Authorization": f"Bearer {settings.pelican_application_key}",
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
-    url = f"{base_url}/api/application/servers"
+    url = f"{settings.pelican_base_url}/api/application/servers"
     
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers) as response:
@@ -43,17 +45,17 @@ async def get_servers(app_key, base_url):
                 raise Exception(f"Application API Error: {response.status}")
 
 
-async def get_server_stats(client_key, base_url, server_id, server_name):
+async def get_server_stats(server_id, server_name):
     """
     Fetches the live resource usage for a specific server from the Pelican Client API.
     Raises an Exception if the request fails.
     """
     headers = {
-        "Authorization": f"Bearer {client_key}",
+        "Authorization": f"Bearer {settings.pelican_client_key}",
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
-    url = f"{base_url}/api/client/servers/{server_id}/resources"
+    url = f"{settings.pelican_base_url}/api/client/servers/{server_id}/resources"
     
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers) as response:

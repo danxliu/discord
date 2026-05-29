@@ -1,17 +1,10 @@
 import asyncio
-import os
 
 import discord
 from discord import app_commands
-from dotenv import load_dotenv
 
 import pelican
-
-load_dotenv()
-TOKEN = os.getenv("DISCORD_TOKEN")
-PELICAN_APPLICATION_KEY = os.getenv("PELICAN_APPLICATION_KEY")
-PELICAN_CLIENT_KEY = os.getenv("PELICAN_CLIENT_KEY")
-PELICAN_BASE_URL = os.getenv("PELICAN_BASE_URL")
+from config import settings
 
 
 class Client(discord.Client):
@@ -43,37 +36,28 @@ async def status(interaction: discord.Interaction):
     await interaction.response.defer()
 
     try:
-        servers_data = await pelican.get_servers(
-            PELICAN_APPLICATION_KEY, PELICAN_BASE_URL
-        )
+        servers_data = await pelican.get_servers()
 
         if not servers_data:
             await interaction.followup.send("No servers found on this Pelican panel.")
             return
+
         tasks = []
         for server in servers_data:
-            tasks.append(
-                pelican.get_server_stats(
-                    PELICAN_CLIENT_KEY,
-                    PELICAN_BASE_URL,
-                    server.identifier,
-                    server.name,
-                )
-            )
+            tasks.append(pelican.get_server_stats(server.identifier, server.name))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
+
         embed = discord.Embed(
             title="Pelican Server Status",
             color=discord.Color.blue(),
-            description=f"Current status of servers on {PELICAN_BASE_URL}",
+            description=f"Current status of servers on {settings.pelican_base_url}",
         )
 
         for server_info, res in zip(servers_data, results):
             if isinstance(res, Exception):
                 embed.add_field(
-                    name=server_info.name,
-                    value=f"❌ Error: {str(res)}",
-                    inline=False,
+                    name=server_info.name, value=f"❌ Error: {str(res)}", inline=False
                 )
             else:
                 stats = (
@@ -92,16 +76,7 @@ async def status(interaction: discord.Interaction):
 
 
 def main():
-    if not TOKEN:
-        print("Error: DISCORD_TOKEN not found in environment.")
-        return
-    if not PELICAN_APPLICATION_KEY or not PELICAN_CLIENT_KEY or not PELICAN_BASE_URL:
-        print(
-            "Error: Pelican configuration (Key or Base URL) not found in environment."
-        )
-        return
-
-    client.run(TOKEN)
+    client.run(settings.discord_token)
 
 
 if __name__ == "__main__":
