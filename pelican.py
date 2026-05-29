@@ -1,4 +1,18 @@
 import aiohttp
+from pydantic import BaseModel
+
+
+class ServerInfo(BaseModel):
+    name: str
+    identifier: str
+
+
+class ServerStats(BaseModel):
+    name: str
+    state: str
+    cpu: str
+    memory: str
+    disk: str
 
 
 async def get_servers(app_key, base_url):
@@ -20,10 +34,10 @@ async def get_servers(app_key, base_url):
                 servers = []
                 for server in data.get("data", []):
                     attr = server["attributes"]
-                    servers.append({
-                        "name": attr["name"],
-                        "identifier": attr["identifier"]
-                    })
+                    servers.append(ServerInfo(
+                        name=attr["name"],
+                        identifier=attr["identifier"]
+                    ))
                 return servers
             else:
                 raise Exception(f"Application API Error: {response.status}")
@@ -55,12 +69,12 @@ async def get_server_stats(client_key, base_url, server_id, server_name):
 
                 state_emoji = "🟢" if state == "running" else "🔴" if state == "offline" else "🟡"
                 
-                return {
-                    "name": server_name,
-                    "state": f"{state_emoji} {state.capitalize()}",
-                    "cpu": f"{cpu:.2f}%",
-                    "memory": f"{memory:.2f} MB",
-                    "disk": f"{disk:.2f} MB",
-                }
+                return ServerStats(
+                    name=server_name,
+                    state=f"{state_emoji} {state.capitalize()}",
+                    cpu=f"{cpu:.2f}%",
+                    memory=f"{memory:.2f} MB",
+                    disk=f"{disk:.2f} MB",
+                )
             else:
                 raise Exception(f"Client API Error: {response.status}")

@@ -56,8 +56,8 @@ async def status(interaction: discord.Interaction):
                 pelican.get_server_stats(
                     PELICAN_CLIENT_KEY,
                     PELICAN_BASE_URL,
-                    server["identifier"],
-                    server["name"],
+                    server.identifier,
+                    server.name,
                 )
             )
 
@@ -71,18 +71,18 @@ async def status(interaction: discord.Interaction):
         for server_info, res in zip(servers_data, results):
             if isinstance(res, Exception):
                 embed.add_field(
-                    name=server_info["name"],
+                    name=server_info.name,
                     value=f"❌ Error: {str(res)}",
                     inline=False,
                 )
             else:
                 stats = (
-                    f"**Status:** {res['state']}\n"
-                    f"**CPU:** {res['cpu']}\n"
-                    f"**Memory:** {res['memory']}\n"
-                    f"**Disk:** {res['disk']}"
+                    f"**Status:** {res.state}\n"
+                    f"**CPU:** {res.cpu}\n"
+                    f"**Memory:** {res.memory}\n"
+                    f"**Disk:** {res.disk}"
                 )
-                embed.add_field(name=res["name"], value=stats, inline=False)
+                embed.add_field(name=res.name, value=stats, inline=False)
 
         await interaction.followup.send(embed=embed)
     except Exception as e:
