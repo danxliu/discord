@@ -25,6 +25,37 @@ class Client(discord.Client):
 client = Client()
 
 
+class ServerControlView(discord.ui.View):
+    def __init__(self, server_id: str, server_name: str):
+        super().__init__(timeout=None)
+        self.server_id = server_id
+        self.server_name = server_name
+
+    async def _handle_action(self, interaction: discord.Interaction, signal: str):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await pelican.send_power_action(self.server_id, signal)
+            await interaction.followup.send(
+                f"Sent {signal} signal to {self.server_name}.", ephemeral=True
+            )
+        except Exception as e:
+            await interaction.followup.send(
+                f"Failed to send {signal} signal: {str(e)}", ephemeral=True
+            )
+
+    @discord.ui.button(label="Start", style=discord.ButtonStyle.success)
+    async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._handle_action(interaction, "start")
+
+    @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger)
+    async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._handle_action(interaction, "stop")
+
+    @discord.ui.button(label="Restart", style=discord.ButtonStyle.primary)
+    async def restart(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._handle_action(interaction, "restart")
+
+
 @client.tree.command(name="ping", description="Check the bot's latency")
 async def ping(interaction: discord.Interaction):
     latency = round(client.latency * 1000)
@@ -48,30 +79,27 @@ async def status(interaction: discord.Interaction):
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        embed = discord.Embed(
-            title="Pelican Server Status",
-            color=discord.Color.blue(),
-            description=f"Current status of servers on {settings.pelican_base_url}",
+        await interaction.followup.send(
+            f"Pelican Server Status (Host: {settings.pelican_base_url})"
         )
 
         for server_info, res in zip(servers_data, results):
+            embed = discord.Embed(title=server_info.name, color=discord.Color.blue())
             if isinstance(res, Exception):
-                embed.add_field(
-                    name=server_info.name, value=f"❌ Error: {str(res)}", inline=False
-                )
+                embed.description = f"Error: {str(res)}"
+                await interaction.followup.send(embed=embed)
             else:
-                stats = (
-                    f"**Status:** {res.state}\n"
-                    f"**CPU:** {res.cpu}\n"
-                    f"**Memory:** {res.memory}\n"
-                    f"**Disk:** {res.disk}"
-                )
-                embed.add_field(name=res.name, value=stats, inline=False)
+                embed.add_field(name="Status", value=res.state, inline=True)
+                embed.add_field(name="CPU", value=res.cpu, inline=True)
+                embed.add_field(name="Memory", value=res.memory, inline=True)
+                embed.add_field(name="Disk", value=res.disk, inline=True)
 
-        await interaction.followup.send(embed=embed)
+                view = ServerControlView(server_info.identifier, server_info.name)
+                await interaction.followup.send(embed=embed, view=view)
+
     except Exception as e:
         await interaction.followup.send(
-            f"❌ An error occurred while fetching the server list: {str(e)}"
+            f"An error occurred while fetching the server list: {str(e)}"
         )
 
 
