@@ -44,6 +44,16 @@ async def get_servers():
                 raise Exception(f"Application API Error: {response.status}")
 
 
+def format_bytes(b: int) -> str:
+    """
+    Formats bytes into a human-readable string (GB, MB, KB, B).
+    """
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if b < 1024 or unit == "TB":
+            return f"{b:.2f} {unit}"
+        b /= 1024
+
+
 async def get_server_stats(server_id, server_name):
     """
     Fetches the live resource usage for a specific server from the Pelican Client API.
@@ -65,15 +75,15 @@ async def get_server_stats(server_id, server_name):
 
                 state = attr["current_state"]
                 cpu = resources["cpu_absolute"]
-                memory = resources["memory_bytes"] / (1024 * 1024)  # MB
-                disk = resources["disk_bytes"] / (1024 * 1024)  # MB
+                memory_bytes = resources["memory_bytes"]
+                disk_bytes = resources["disk_bytes"]
 
                 return ServerStats(
                     name=server_name,
                     state=state.capitalize(),
                     cpu=f"{cpu:.2f}%",
-                    memory=f"{memory:.2f} MB",
-                    disk=f"{disk:.2f} MB",
+                    memory=format_bytes(memory_bytes),
+                    disk=format_bytes(disk_bytes),
                 )
             else:
                 raise Exception(f"Client API Error: {response.status}")

@@ -7,6 +7,34 @@ import pelican
 from config import settings
 
 
+def render_server_embed(
+    server_info: pelican.ServerInfo,
+    res: pelican.ServerStats | Exception,
+    expires_at: float,
+    now: float,
+) -> discord.Embed:
+    remaining = int(max(0, expires_at - now))
+    timer_str = f"Expires in: {remaining // 60}m {remaining % 60}s"
+    host_link = f"-# {settings.pelican_base_url}"
+
+    embed = discord.Embed(
+        title=server_info.name,
+        url=f"{settings.pelican_base_url}/server/{server_info.identifier}",
+        color=discord.Color.blue(),
+        description=f"{timer_str}\n{host_link}",
+    )
+
+    if isinstance(res, Exception):
+        embed.description += f"\nError: {str(res)}"
+    else:
+        embed.add_field(name="Status", value=res.state, inline=False)
+        embed.add_field(name="CPU", value=res.cpu, inline=False)
+        embed.add_field(name="Memory", value=res.memory, inline=False)
+        embed.add_field(name="Disk", value=res.disk, inline=False)
+
+    return embed
+
+
 class Client(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
@@ -52,8 +80,75 @@ class ServerControlView(discord.ui.View):
         await self._handle_action(interaction, "stop")
 
     @discord.ui.button(label="Restart", style=discord.ButtonStyle.primary)
-    async def restart(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def restart(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
         await self._handle_action(interaction, "restart")
+
+
+class StatusUpdater:
+    def __init__(self):
+        self.active_messages = {}  # msg_id -> {message, server_info, cache, expires_at}
+        self.task = None
+
+    def add_messages(self, messages_data: dict):
+        for msg_id, data in messages_data.items():
+            self.active_messages[msg_id] = data
+        if self.task is None or self.task.done():
+            self.task = asyncio.create_task(self._updater_loop())
+
+    async def _updater_loop(self):
+        while self.active_messages:
+            await asyncio.sleep(5)
+            now = asyncio.get_event_loop().time()
+            expired_ids = [
+                msg_id
+                for msg_id, data in self.active_messages.items()
+                if now > data["expires_at"]
+            ]
+            for msg_id in expired_ids:
+                data = self.active_messages.pop(msg_id)
+                try:
+                    await data["message"].delete()
+                except (discord.NotFound, discord.Forbidden):
+                    pass
+
+            if not self.active_messages:
+                break
+            server_ids = {
+                data["server_info"].identifier: data["server_info"]
+                for data in self.active_messages.values()
+            }
+            fetch_tasks = [
+                pelican.get_server_stats(sid, sinfo.name)
+                for sid, sinfo in server_ids.items()
+            ]
+            fetch_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+            stats_map = {sid: res for sid, res in zip(server_ids.keys(), fetch_results)}
+            msg_ids_to_remove = []
+            for msg_id, data in self.active_messages.items():
+                server_id = data["server_info"].identifier
+                res = stats_map[server_id]
+
+                embed = render_server_embed(
+                    data["server_info"], res, data["expires_at"], now
+                )
+
+                try:
+                    view = ServerControlView(
+                        data["server_info"].identifier, data["server_info"].name
+                    )
+                    await data["message"].edit(embed=embed, view=view)
+                except discord.NotFound:
+                    msg_ids_to_remove.append(msg_id)
+                except Exception:
+                    pass
+
+            for msg_id in msg_ids_to_remove:
+                self.active_messages.pop(msg_id, None)
+
+
+status_updater = StatusUpdater()
 
 
 @client.tree.command(name="ping", description="Check the bot's latency")
@@ -79,23 +174,26 @@ async def status(interaction: discord.Interaction):
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        await interaction.followup.send(
-            f"Pelican Server Status (Host: {settings.pelican_base_url})"
-        )
+        messages_data = {}
+        now = asyncio.get_event_loop().time()
+        expires_at = now + 300
 
         for server_info, res in zip(servers_data, results):
-            embed = discord.Embed(title=server_info.name, color=discord.Color.blue())
-            if isinstance(res, Exception):
-                embed.description = f"Error: {str(res)}"
-                await interaction.followup.send(embed=embed)
-            else:
-                embed.add_field(name="Status", value=res.state, inline=True)
-                embed.add_field(name="CPU", value=res.cpu, inline=True)
-                embed.add_field(name="Memory", value=res.memory, inline=True)
-                embed.add_field(name="Disk", value=res.disk, inline=True)
+            embed = render_server_embed(server_info, res, expires_at, now)
 
+            if isinstance(res, Exception):
+                msg = await interaction.followup.send(embed=embed, wait=True)
+            else:
                 view = ServerControlView(server_info.identifier, server_info.name)
-                await interaction.followup.send(embed=embed, view=view)
+                msg = await interaction.followup.send(embed=embed, view=view, wait=True)
+
+            messages_data[msg.id] = {
+                "message": msg,
+                "server_info": server_info,
+                "expires_at": expires_at,
+            }
+
+        status_updater.add_messages(messages_data)
 
     except Exception as e:
         await interaction.followup.send(
