@@ -157,8 +157,8 @@ async def ping(interaction: discord.Interaction):
     await interaction.response.send_message(f"Pong! Latency: {latency}ms")
 
 
-@client.tree.command(name="status", description="Check the status of Pelican servers")
-async def status(interaction: discord.Interaction):
+@client.tree.command(name="servers", description="Check the status of Pelican servers")
+async def servers(interaction: discord.Interaction):
     await interaction.response.defer()
 
     try:
