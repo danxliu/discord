@@ -17,8 +17,8 @@ def should_respond(
         return True
     if client_user in message.mentions:
         return True
-    if message.reference and message.reference.resolved:
-        ref = message.reference.resolved
+    if message.reference:
+        ref = message.reference.resolved or message.reference.cached_message
         if isinstance(ref, discord.Message) and ref.author.id == client_user.id:
             return True
     return False
@@ -30,6 +30,56 @@ def clean_prompt(content: str, client_user: discord.ClientUser) -> str:
     return cleaned.strip()
 
 
+def extract_message_text(msg: discord.Message) -> str:
+    parts = []
+    if msg.content:
+        parts.append(msg.content)
+    for embed in msg.embeds:
+        embed_parts = []
+        if embed.title:
+            embed_parts.append(embed.title)
+        if embed.description:
+            embed_parts.append(embed.description)
+        for field in embed.fields:
+            embed_parts.append(f"{field.name}: {field.value}")
+        if embed_parts:
+            parts.append("\n".join(embed_parts))
+    for attachment in msg.attachments:
+        parts.append(f"[Attachment: {attachment.url}]")
+    return "\n\n".join(parts).strip()
+
+
+async def get_referenced_message(
+    message: discord.Message,
+) -> discord.Message | None:
+    if not message.reference or not message.reference.message_id:
+        return None
+
+    ref = message.reference.resolved or message.reference.cached_message
+    if isinstance(ref, discord.Message):
+        return ref
+
+    try:
+        channel = message.channel
+        if (
+            message.reference.channel_id
+            and message.reference.channel_id != message.channel.id
+            and message.guild
+        ):
+            fetched_channel = message.guild.get_channel(
+                message.reference.channel_id
+            )
+            if isinstance(fetched_channel, discord.abc.Messageable):
+                channel = fetched_channel
+        fetched = await channel.fetch_message(message.reference.message_id)
+        if isinstance(fetched, discord.Message):
+            return fetched
+    except (discord.NotFound, discord.HTTPException, discord.Forbidden):
+        return None
+
+    return None
+
+
 async def handle_message_event(
     message: discord.Message,
     client_user: discord.ClientUser,
@@ -39,9 +89,22 @@ async def handle_message_event(
     if not should_respond(message, client_user):
         return
 
+    is_reply = bool(message.reference and message.reference.message_id)
+    ref_message = await get_referenced_message(message) if is_reply else None
+
     prompt = clean_prompt(message.content, client_user)
+    if message.attachments:
+        att_urls = [f"[Attachment: {a.url}]" for a in message.attachments]
+        if prompt:
+            prompt += "\n" + "\n".join(att_urls)
+        else:
+            prompt = "\n".join(att_urls)
+
     if not prompt:
-        return
+        if is_reply and ref_message:
+            prompt = "Please respond to the referenced message."
+        else:
+            return
 
     await DiscordMessenger.safe_react(message, "⏳")
     status_msg = await DiscordMessenger.safe_send(
@@ -61,10 +124,33 @@ async def handle_message_event(
         message.guild,
         tool_registry=agent_loop.tool_registry,
     )
-    history = channel_history.get_history(message.channel.id)
-    messages = [{"role": "system", "content": sys_prompt}] + history + [
-        {"role": "user", "content": prompt}
-    ]
+
+    messages = [{"role": "system", "content": sys_prompt}]
+    initial_role: str | None = None
+    initial_content: str | None = None
+
+    if is_reply:
+        if ref_message:
+            ref_text = extract_message_text(ref_message)
+            if ref_message.author.id == client_user.id:
+                initial_role = "assistant"
+                initial_content = ref_text
+            else:
+                initial_role = "user"
+                cleaned_ref_text = clean_prompt(ref_text, client_user)
+                if ref_message.author.id != message.author.id:
+                    initial_content = (
+                        f"{ref_message.author.display_name}: {cleaned_ref_text}"
+                    )
+                else:
+                    initial_content = cleaned_ref_text
+
+            if initial_content:
+                messages.append({"role": initial_role, "content": initial_content})
+    else:
+        messages.extend(channel_history.get_history(message.channel.id))
+
+    messages.append({"role": "user", "content": prompt})
 
     context = ToolContext(
         user_id=message.author.id,
@@ -80,6 +166,12 @@ async def handle_message_event(
         for chunk in chunks[1:]:
             await DiscordMessenger.safe_send(message.channel, chunk)
 
+        if is_reply:
+            channel_history.clear(message.channel.id)
+            if initial_role and initial_content:
+                channel_history.add_turn(
+                    message.channel.id, initial_role, initial_content
+                )
         channel_history.add_turn(message.channel.id, "user", prompt)
         channel_history.add_turn(message.channel.id, "assistant", answer)
 
