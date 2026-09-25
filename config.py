@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     ai_system_prompt_path: str = "prompts/system.md"
     ai_max_iterations: int = 10
     ai_max_history_turns: int = 20
+    ai_channel_history_limit: int = 10
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
