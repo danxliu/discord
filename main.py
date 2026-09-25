@@ -239,9 +239,18 @@ async def servers(interaction: discord.Interaction):
 
 
 @client.tree.command(name="chat", description="Chat with the AI assistant")
-@app_commands.describe(prompt="Your message or question for the AI")
-async def chat(interaction: discord.Interaction, prompt: str):
-    await handle_chat_command(interaction, prompt, agent_loop, channel_history)
+@app_commands.describe(
+    prompt="Your message or question for the AI",
+    image="Optional image to attach and analyze",
+)
+async def chat(
+    interaction: discord.Interaction,
+    prompt: str,
+    image: discord.Attachment | None = None,
+):
+    await handle_chat_command(
+        interaction, prompt, agent_loop, channel_history, image=image
+    )
 
 
 @client.tree.command(
