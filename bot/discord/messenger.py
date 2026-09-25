@@ -1,6 +1,9 @@
-import asyncio
+import logging
 from typing import List, Optional
+
 import discord
+
+logger = logging.getLogger(__name__)
 
 
 def split_content(text: str, limit: int = 2000) -> List[str]:
@@ -86,8 +89,12 @@ class DiscordMessenger:
     async def safe_react(message: discord.Message, emoji: str) -> None:
         try:
             await message.add_reaction(emoji)
+        except (discord.NotFound, discord.Forbidden):
+            logger.debug("Could not add reaction message_id=%s", message.id)
+        except discord.HTTPException:
+            logger.warning("Discord rejected reaction message_id=%s", message.id, exc_info=True)
         except Exception:
-            pass
+            logger.exception("Unexpected reaction failure message_id=%s", message.id)
 
     @staticmethod
     async def safe_remove_reaction(
@@ -95,8 +102,12 @@ class DiscordMessenger:
     ) -> None:
         try:
             await message.remove_reaction(emoji, user)
+        except (discord.NotFound, discord.Forbidden):
+            logger.debug("Could not remove reaction message_id=%s", message.id)
+        except discord.HTTPException:
+            logger.warning("Discord rejected reaction removal message_id=%s", message.id, exc_info=True)
         except Exception:
-            pass
+            logger.exception("Unexpected reaction removal failure message_id=%s", message.id)
 
     @staticmethod
     async def safe_edit(message: discord.Message, content: str) -> None:
@@ -104,8 +115,12 @@ class DiscordMessenger:
             content = "*(Empty response)*"
         try:
             await message.edit(content=content)
+        except (discord.NotFound, discord.Forbidden):
+            logger.debug("Could not edit message message_id=%s", message.id)
+        except discord.HTTPException:
+            logger.warning("Discord rejected message edit message_id=%s", message.id, exc_info=True)
         except Exception:
-            pass
+            logger.exception("Unexpected message edit failure message_id=%s", message.id)
 
     @staticmethod
     async def safe_send(
@@ -119,5 +134,17 @@ class DiscordMessenger:
             if reply_to:
                 return await reply_to.reply(content, mention_author=False)
             return await channel.send(content)
+        except (discord.NotFound, discord.Forbidden):
+            logger.debug("Could not send message channel_id=%s", getattr(channel, "id", None))
+        except discord.HTTPException:
+            logger.warning(
+                "Discord rejected message send channel_id=%s",
+                getattr(channel, "id", None),
+                exc_info=True,
+            )
         except Exception:
-            return None
+            logger.exception(
+                "Unexpected message send failure channel_id=%s",
+                getattr(channel, "id", None),
+            )
+        return None

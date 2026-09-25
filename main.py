@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from typing import Optional
 
 import discord
@@ -16,6 +17,8 @@ from bot.tools import (
     WebScrapeTool,
     WebSearchTool,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def render_server_embed(
@@ -55,11 +58,10 @@ class Client(discord.Client):
 
     async def setup_hook(self):
         await self.tree.sync()
-        print(f"Synced slash commands for {self.user}")
+        logger.info("Synced slash commands")
 
     async def on_ready(self):
-        print(f"Logged in as {self.user} (ID: {self.user.id})")
-        print("------")
+        logger.info("Logged in as %s (ID: %s)", self.user, self.user.id)
 
     async def on_message(self, message: discord.Message):
         await handle_message_event(message, self.user, agent_loop, channel_history)
@@ -94,12 +96,30 @@ class ServerControlView(discord.ui.View):
 
     async def _handle_action(self, interaction: discord.Interaction, signal: str):
         await interaction.response.defer(ephemeral=True)
+        logger.info(
+            "Server power action requested user_id=%s server_id=%s action=%s",
+            interaction.user.id,
+            self.server_id,
+            signal,
+        )
         try:
             await pelican.send_power_action(self.server_id, signal)
+            logger.info(
+                "Server power action sent user_id=%s server_id=%s action=%s",
+                interaction.user.id,
+                self.server_id,
+                signal,
+            )
             await interaction.followup.send(
                 f"Sent {signal} signal to {self.server_name}.", ephemeral=True
             )
         except Exception as e:
+            logger.exception(
+                "Server power action failed user_id=%s server_id=%s action=%s",
+                interaction.user.id,
+                self.server_id,
+                signal,
+            )
             await interaction.followup.send(
                 f"Failed to send {signal} signal: {str(e)}", ephemeral=True
             )
@@ -141,7 +161,7 @@ class StatusUpdater:
                 try:
                     await data["message"].delete()
                 except (discord.NotFound, discord.Forbidden):
-                    pass
+                    logger.debug("Could not delete expired status message id=%s", msg_id)
 
     async def _refresh_messages(self, now: float) -> None:
         server_ids = {
@@ -169,9 +189,10 @@ class StatusUpdater:
                 )
                 await data["message"].edit(embed=embed, view=view)
             except discord.NotFound:
+                logger.info("Removing deleted status message id=%s", msg_id)
                 msg_ids_to_remove.append(msg_id)
             except Exception:
-                pass
+                logger.exception("Failed to refresh status message id=%s", msg_id)
 
         for msg_id in msg_ids_to_remove:
             self.active_messages.pop(msg_id, None)
@@ -179,7 +200,7 @@ class StatusUpdater:
     async def _updater_loop(self) -> None:
         while self.active_messages:
             await asyncio.sleep(5)
-            now = asyncio.get_event_loop().time()
+            now = asyncio.get_running_loop().time()
             await self._cleanup_expired(now)
             if self.active_messages:
                 await self._refresh_messages(now)
@@ -197,6 +218,7 @@ async def ping(interaction: discord.Interaction):
 @client.tree.command(name="servers", description="Check the status of Pelican servers")
 async def servers(interaction: discord.Interaction):
     await interaction.response.defer()
+    logger.info("Server status requested user_id=%s", interaction.user.id)
 
     try:
         servers_data = await pelican.get_servers()
@@ -233,6 +255,7 @@ async def servers(interaction: discord.Interaction):
         status_updater.add_messages(messages_data)
 
     except Exception as e:
+        logger.exception("Failed to fetch server status user_id=%s", interaction.user.id)
         await interaction.followup.send(
             f"An error occurred while fetching the server list: {str(e)}"
         )
@@ -265,6 +288,12 @@ async def clear(interaction: discord.Interaction):
 
 
 def main():
+    level = getattr(logging, settings.log_level.upper(), logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    logger.info("Starting Discord bot")
     client.run(settings.discord_token)
 
 

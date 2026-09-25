@@ -1,6 +1,9 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import logging
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -9,6 +12,7 @@ class ToolContext:
     user_name: str
     channel_id: int
     guild_id: Optional[int] = None
+    request_id: str | None = None
 
 
 class BaseTool(ABC):
@@ -72,4 +76,9 @@ class ToolRegistry:
         try:
             return await tool.execute(context, **arguments)
         except Exception as e:
+            logger.exception(
+                "Tool execution failed tool=%s request_id=%s",
+                name,
+                context.request_id,
+            )
             return f"Error executing tool '{name}': {str(e)}"

@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     ai_max_image_size_mb: int = 20
     ai_stream_response: bool = True
     ai_stream_interval: float = 1.2
+    log_level: str = "INFO"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

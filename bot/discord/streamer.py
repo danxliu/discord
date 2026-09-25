@@ -1,8 +1,12 @@
 import asyncio
+import logging
 import time
 from typing import Dict, List, Optional
+
 import discord
 from bot.discord.messenger import split_content
+
+logger = logging.getLogger(__name__)
 
 
 def auto_close_code_blocks(text: str) -> str:
@@ -91,13 +95,15 @@ class MessageStreamer:
         except discord.HTTPException as e:
             if e.status == 429:
                 retry_after = getattr(e, "retry_after", 2.0) or 2.0
+                logger.warning("Discord rate limited message edit; retrying after %.2fs", retry_after)
                 self._rate_limit_until = time.monotonic() + retry_after
                 await asyncio.sleep(retry_after)
             elif e.code == 50006:
-                # Cannot send empty message
-                pass
+                logger.debug("Discord rejected empty message edit")
+            else:
+                logger.warning("Discord message edit failed", exc_info=True)
         except Exception:
-            pass
+            logger.exception("Unexpected message edit failure")
         return False
 
     async def _send_next_message(self, content: str) -> Optional[discord.Message]:
@@ -121,10 +127,13 @@ class MessageStreamer:
         except discord.HTTPException as e:
             if e.status == 429:
                 retry_after = getattr(e, "retry_after", 2.0) or 2.0
+                logger.warning("Discord rate limited message send; retrying after %.2fs", retry_after)
                 self._rate_limit_until = time.monotonic() + retry_after
                 await asyncio.sleep(retry_after)
+            else:
+                logger.warning("Discord message send failed", exc_info=True)
         except Exception:
-            pass
+            logger.exception("Unexpected message send failure")
         return None
 
     async def _flush(self, is_final: bool = False) -> None:
@@ -164,7 +173,7 @@ class MessageStreamer:
         except asyncio.CancelledError:
             pass
         except Exception:
-            pass
+            logger.exception("Message stream update failed")
 
     async def finalize(
         self, final_text: Optional[str] = None

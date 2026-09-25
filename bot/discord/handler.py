@@ -1,5 +1,8 @@
 from datetime import datetime
+import logging
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
+from uuid import uuid4
+
 import discord
 from bot.agent.loop import AgenticLoop
 from bot.discord.image import (
@@ -20,6 +23,8 @@ from bot.memory.channel import ChannelHistory
 from bot.memory.prompt import build_system_prompt
 from bot.tools.base import ToolContext
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def should_respond(message: discord.Message, client_user: discord.ClientUser) -> bool:
@@ -193,6 +198,7 @@ async def _execute_chat_pipeline(
     guild: Optional[discord.Guild],
     client_user: Optional[discord.ClientUser],
     prompt: str,
+    request_id: str,
     streamer: Optional[MessageStreamer],
     agent_loop: AgenticLoop,
     channel_history: ChannelHistory,
@@ -250,6 +256,7 @@ async def _execute_chat_pipeline(
         user_name=user.name,
         channel_id=channel_id,
         guild_id=guild.id if guild else None,
+        request_id=request_id,
     )
 
     on_chunk = streamer.feed if streamer else None
@@ -260,6 +267,7 @@ async def _execute_chat_pipeline(
             messages, context, on_status=on_status, on_chunk=on_chunk
         )
     except Exception as error:
+        logger.exception("Agent request failed request_id=%s", request_id)
         err_msg = str(error)
         if not has_images or not is_vision_unsupported_error(err_msg):
             if streamer:
@@ -279,6 +287,7 @@ async def _execute_chat_pipeline(
                 text_only_messages, context, on_status=on_status, on_chunk=on_chunk
             )
         except Exception as retry_error:
+            logger.exception("Text-only retry failed request_id=%s", request_id)
             if streamer:
                 await streamer.stop()
             await on_error(f"{err_msg}\n(Retry as text also failed: {retry_error})")
@@ -294,6 +303,12 @@ async def _execute_chat_pipeline(
         await streamer.finalize(answer)
     elif on_fallback_send:
         await on_fallback_send(split_content(answer))
+    logger.info(
+        "Response handling finished request_id=%s response_chars=%d streaming=%s",
+        request_id,
+        len(answer),
+        streamer is not None,
+    )
 
     channel_history.add_turn(channel_id, "user", to_text_summary(current_turn_content))
     channel_history.add_turn(channel_id, "assistant", answer)
@@ -309,6 +324,16 @@ async def handle_message_event(
     if not should_respond(message, client_user):
         return
 
+    request_id = uuid4().hex[:12]
+    logger.info(
+        "Discord message received request_id=%s user_id=%s channel_id=%s guild_id=%s content_chars=%d attachments=%d",
+        request_id,
+        message.author.id,
+        message.channel.id,
+        message.guild.id if message.guild else None,
+        len(message.content),
+        len(message.attachments),
+    )
     is_reply = bool(message.reference and message.reference.message_id)
     ref_message = await get_referenced_message(message) if is_reply else None
 
@@ -363,6 +388,16 @@ async def handle_message_event(
         else:
             return
 
+    logger.debug(
+        "Discord message request prepared request_id=%s user_id=%s channel_id=%s guild_id=%s prompt_chars=%d attachments=%d images=%d",
+        request_id,
+        message.author.id,
+        message.channel.id,
+        message.guild.id if message.guild else None,
+        len(prompt),
+        len(message.attachments),
+        len(current_image_parts),
+    )
     await DiscordMessenger.safe_react(message, "⏳")
     status_msg = await DiscordMessenger.safe_send(
         message.channel, "*Thinking...*", reply_to=message
@@ -402,6 +437,7 @@ async def handle_message_event(
         guild=message.guild,
         client_user=client_user,
         prompt=prompt,
+        request_id=request_id,
         streamer=streamer,
         agent_loop=agent_loop,
         channel_history=channel_history,
@@ -425,7 +461,17 @@ async def handle_chat_command(
     channel_history: ChannelHistory,
     image: Optional[discord.Attachment] = None,
 ) -> None:
+    request_id = uuid4().hex[:12]
     await interaction.response.defer()
+    logger.info(
+        "Slash chat request received request_id=%s user_id=%s channel_id=%s guild_id=%s prompt_chars=%d image_attached=%s",
+        request_id,
+        interaction.user.id,
+        interaction.channel_id,
+        interaction.guild_id,
+        len(prompt),
+        image is not None,
+    )
 
     channel = interaction.channel or interaction.user
     client_user = interaction.client.user if interaction.client else None
@@ -460,6 +506,16 @@ async def handle_chat_command(
         else:
             prompt = "Hello!"
 
+    logger.debug(
+        "Slash chat request prepared request_id=%s user_id=%s channel_id=%s guild_id=%s prompt_chars=%d images=%d",
+        request_id,
+        interaction.user.id,
+        interaction.channel_id,
+        interaction.guild_id,
+        len(prompt),
+        len(current_image_parts),
+    )
+
     streamer = (
         MessageStreamer(
             interaction=interaction,
@@ -473,8 +529,10 @@ async def handle_chat_command(
     async def on_status(text: str) -> None:
         try:
             await interaction.edit_original_response(content=f"*{text}*")
+        except discord.HTTPException:
+            logger.warning("Could not update chat status request_id=%s", request_id)
         except Exception:
-            pass
+            logger.exception("Unexpected chat status update failure request_id=%s", request_id)
 
     async def on_error(err: str) -> None:
         await interaction.edit_original_response(content=f"❌ Error: {err}")
@@ -493,6 +551,7 @@ async def handle_chat_command(
         guild=interaction.guild,
         client_user=client_user,
         prompt=prompt,
+        request_id=request_id,
         streamer=streamer,
         agent_loop=agent_loop,
         channel_history=channel_history,

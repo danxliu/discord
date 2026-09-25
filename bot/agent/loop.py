@@ -1,9 +1,13 @@
 import json
+import logging
 import re
+import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from openai import AsyncOpenAI
 from bot.agent.sanitizer import StreamingSanitizer
 from bot.tools.base import ToolContext, ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 THINK_PATTERNS = [
     re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE),
@@ -166,7 +170,20 @@ class AgenticLoop:
                 await on_status(f"Calling: {display_name}...")
 
             args = self._parse_tool_arguments(tc["function"]["arguments"])
+            started_at = time.monotonic()
+            logger.info(
+                "Tool call started request_id=%s tool=%s",
+                context.request_id,
+                fn_name,
+            )
             result = await self.tool_registry.execute(fn_name, args, context)
+            logger.info(
+                "Tool call completed request_id=%s tool=%s success=%s duration_seconds=%.2f",
+                context.request_id,
+                fn_name,
+                not str(result).startswith("Error"),
+                time.monotonic() - started_at,
+            )
 
             messages.append(
                 {
@@ -188,6 +205,14 @@ class AgenticLoop:
         tools = self.tool_registry.get_schemas()
         should_stream = self.stream and on_chunk is not None
         iteration = 0
+        tool_call_count = 0
+        started_at = time.monotonic()
+        logger.info(
+            "Agent run started request_id=%s model=%s messages=%d",
+            context.request_id,
+            self.model,
+            len(messages),
+        )
 
         while iteration < self.max_iterations:
             if on_status:
@@ -203,7 +228,16 @@ class AgenticLoop:
                 )
 
             if not tool_calls:
-                return self._sanitize(content)
+                answer = self._sanitize(content)
+                logger.info(
+                    "Agent run completed request_id=%s iterations=%d tool_calls=%d response_chars=%d duration_seconds=%.2f",
+                    context.request_id,
+                    iteration + 1,
+                    tool_call_count,
+                    len(answer),
+                    time.monotonic() - started_at,
+                )
+                return answer
 
             current_messages.append(
                 {
@@ -216,6 +250,13 @@ class AgenticLoop:
             await self._execute_tools(
                 tool_calls, context, current_messages, on_status
             )
+            tool_call_count += len(tool_calls)
             iteration += 1
 
+        logger.warning(
+            "Agent reached iteration limit request_id=%s iterations=%d tool_calls=%d",
+            context.request_id,
+            iteration,
+            tool_call_count,
+        )
         return "Reached maximum tool iterations without completing response."
