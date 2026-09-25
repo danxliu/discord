@@ -9,7 +9,7 @@ class ChannelHistory:
         self._cleared_at: Dict[int, datetime] = {}
 
     def get_history(self, channel_id: int) -> List[Dict[str, str]]:
-        return list(self._histories.get(channel_id, []))
+        return [turn.copy() for turn in self._histories.get(channel_id, [])]
 
     def add_turn(self, channel_id: int, role: str, content: str) -> None:
         if not content:
