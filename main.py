@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from dataclasses import dataclass
 from typing import Optional
 
 import discord
@@ -19,6 +20,13 @@ from bot.tools import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ActiveStatusMessage:
+    message: discord.Message
+    server_info: pelican.ServerInfo
+    expires_at: float
 
 
 def render_server_embed(
@@ -141,10 +149,10 @@ class ServerControlView(discord.ui.View):
 
 class StatusUpdater:
     def __init__(self):
-        self.active_messages = {}  # msg_id -> {message, server_info, cache, expires_at}
+        self.active_messages: dict[int, ActiveStatusMessage] = {}
         self.task: Optional[asyncio.Task] = None
 
-    def add_messages(self, messages_data: dict) -> None:
+    def add_messages(self, messages_data: dict[int, ActiveStatusMessage]) -> None:
         self.active_messages.update(messages_data)
         if self.task is None or self.task.done():
             self.task = asyncio.create_task(self._updater_loop())
@@ -153,19 +161,19 @@ class StatusUpdater:
         expired_ids = [
             msg_id
             for msg_id, data in self.active_messages.items()
-            if now > data["expires_at"]
+            if now > data.expires_at
         ]
         for msg_id in expired_ids:
             data = self.active_messages.pop(msg_id, None)
-            if data and data.get("message"):
+            if data:
                 try:
-                    await data["message"].delete()
+                    await data.message.delete()
                 except (discord.NotFound, discord.Forbidden):
                     logger.debug("Could not delete expired status message id=%s", msg_id)
 
     async def _refresh_messages(self, now: float) -> None:
         server_ids = {
-            data["server_info"].identifier: data["server_info"]
+            data.server_info.identifier: data.server_info
             for data in self.active_messages.values()
         }
         fetch_tasks = [
@@ -177,17 +185,17 @@ class StatusUpdater:
 
         msg_ids_to_remove = []
         for msg_id, data in self.active_messages.items():
-            server_id = data["server_info"].identifier
+            server_id = data.server_info.identifier
             res = stats_map.get(server_id)
 
             embed = render_server_embed(
-                data["server_info"], res, data["expires_at"], now
+                data.server_info, res, data.expires_at, now
             )
             try:
                 view = ServerControlView(
-                    data["server_info"].identifier, data["server_info"].name
+                    data.server_info.identifier, data.server_info.name
                 )
-                await data["message"].edit(embed=embed, view=view)
+                await data.message.edit(embed=embed, view=view)
             except discord.NotFound:
                 logger.info("Removing deleted status message id=%s", msg_id)
                 msg_ids_to_remove.append(msg_id)
@@ -233,8 +241,8 @@ async def servers(interaction: discord.Interaction):
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        messages_data = {}
-        now = asyncio.get_event_loop().time()
+        messages_data: dict[int, ActiveStatusMessage] = {}
+        now = asyncio.get_running_loop().time()
         expires_at = now + 300
 
         for server_info, res in zip(servers_data, results):
@@ -246,11 +254,11 @@ async def servers(interaction: discord.Interaction):
                 view = ServerControlView(server_info.identifier, server_info.name)
                 msg = await interaction.followup.send(embed=embed, view=view, wait=True)
 
-            messages_data[msg.id] = {
-                "message": msg,
-                "server_info": server_info,
-                "expires_at": expires_at,
-            }
+            messages_data[msg.id] = ActiveStatusMessage(
+                message=msg,
+                server_info=server_info,
+                expires_at=expires_at,
+            )
 
         status_updater.add_messages(messages_data)
 
