@@ -1,13 +1,11 @@
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Optional
 
 import discord
 from discord import app_commands
 
 import pelican
-from config import settings
 from bot.agent import AgenticLoop
 from bot.discord import handle_chat_command, handle_message_event
 from bot.memory import ChannelHistory, UserMemory
@@ -18,6 +16,7 @@ from bot.tools import (
     WebScrapeTool,
     WebSearchTool,
 )
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -112,15 +111,6 @@ class ServerControlView(discord.ui.View):
         )
         try:
             await pelican.send_power_action(self.server_id, signal)
-            logger.info(
-                "Server power action sent user_id=%s server_id=%s action=%s",
-                interaction.user.id,
-                self.server_id,
-                signal,
-            )
-            await interaction.followup.send(
-                f"Sent {signal} signal to {self.server_name}.", ephemeral=True
-            )
         except Exception as e:
             logger.exception(
                 "Server power action failed user_id=%s server_id=%s action=%s",
@@ -130,6 +120,25 @@ class ServerControlView(discord.ui.View):
             )
             await interaction.followup.send(
                 f"Failed to send {signal} signal: {str(e)}", ephemeral=True
+            )
+            return
+
+        logger.info(
+            "Server power action sent user_id=%s server_id=%s action=%s",
+            interaction.user.id,
+            self.server_id,
+            signal,
+        )
+        try:
+            await interaction.followup.send(
+                f"Sent {signal} signal to {self.server_name}.", ephemeral=True
+            )
+        except Exception:
+            logger.exception(
+                "Server power action succeeded but confirmation delivery failed user_id=%s server_id=%s action=%s",
+                interaction.user.id,
+                self.server_id,
+                signal,
             )
 
     @discord.ui.button(label="Start", style=discord.ButtonStyle.success)
@@ -150,7 +159,7 @@ class ServerControlView(discord.ui.View):
 class StatusUpdater:
     def __init__(self):
         self.active_messages: dict[int, ActiveStatusMessage] = {}
-        self.task: Optional[asyncio.Task] = None
+        self.task: asyncio.Task | None = None
 
     def add_messages(self, messages_data: dict[int, ActiveStatusMessage]) -> None:
         self.active_messages.update(messages_data)
@@ -169,7 +178,9 @@ class StatusUpdater:
                 try:
                     await data.message.delete()
                 except (discord.NotFound, discord.Forbidden):
-                    logger.debug("Could not delete expired status message id=%s", msg_id)
+                    logger.debug(
+                        "Could not delete expired status message id=%s", msg_id
+                    )
 
     async def _refresh_messages(self, now: float) -> None:
         server_ids = {
@@ -188,9 +199,7 @@ class StatusUpdater:
             server_id = data.server_info.identifier
             res = stats_map.get(server_id)
 
-            embed = render_server_embed(
-                data.server_info, res, data.expires_at, now
-            )
+            embed = render_server_embed(data.server_info, res, data.expires_at, now)
             try:
                 view = ServerControlView(
                     data.server_info.identifier, data.server_info.name
@@ -263,7 +272,9 @@ async def servers(interaction: discord.Interaction):
         status_updater.add_messages(messages_data)
 
     except Exception as e:
-        logger.exception("Failed to fetch server status user_id=%s", interaction.user.id)
+        logger.exception(
+            "Failed to fetch server status user_id=%s", interaction.user.id
+        )
         await interaction.followup.send(
             f"An error occurred while fetching the server list: {str(e)}"
         )

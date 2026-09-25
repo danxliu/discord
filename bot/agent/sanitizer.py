@@ -1,15 +1,36 @@
 import re
-from typing import Awaitable, Callable, List, Optional, Tuple
+from collections.abc import Awaitable, Callable
 
-OPEN_TAG_PATTERNS: List[Tuple[re.Pattern, re.Pattern]] = [
+OPEN_TAG_PATTERNS: list[tuple[re.Pattern, re.Pattern]] = [
     (re.compile(r"^\s*<think>", re.IGNORECASE), re.compile(r"</think>", re.IGNORECASE)),
-    (re.compile(r"^\s*<thought>", re.IGNORECASE), re.compile(r"</thought>", re.IGNORECASE)),
-    (re.compile(r"^\s*<reasoning>", re.IGNORECASE), re.compile(r"</reasoning>", re.IGNORECASE)),
-    (re.compile(r"^\s*<\|thought\|>", re.IGNORECASE), re.compile(r"<\|/?thought\|>", re.IGNORECASE)),
-    (re.compile(r"^\s*<\|think\|>", re.IGNORECASE), re.compile(r"<\|/?think\|>", re.IGNORECASE)),
-    (re.compile(r"^\s*\|thought\|", re.IGNORECASE), re.compile(r"\|/?thought\|", re.IGNORECASE)),
-    (re.compile(r"^\s*\|think\|", re.IGNORECASE), re.compile(r"\|/?think\|", re.IGNORECASE)),
-    (re.compile(r"^\s*\[THINK\]", re.IGNORECASE), re.compile(r"\[/THINK\]", re.IGNORECASE)),
+    (
+        re.compile(r"^\s*<thought>", re.IGNORECASE),
+        re.compile(r"</thought>", re.IGNORECASE),
+    ),
+    (
+        re.compile(r"^\s*<reasoning>", re.IGNORECASE),
+        re.compile(r"</reasoning>", re.IGNORECASE),
+    ),
+    (
+        re.compile(r"^\s*<\|thought\|>", re.IGNORECASE),
+        re.compile(r"<\|/?thought\|>", re.IGNORECASE),
+    ),
+    (
+        re.compile(r"^\s*<\|think\|>", re.IGNORECASE),
+        re.compile(r"<\|/?think\|>", re.IGNORECASE),
+    ),
+    (
+        re.compile(r"^\s*\|thought\|", re.IGNORECASE),
+        re.compile(r"\|/?thought\|", re.IGNORECASE),
+    ),
+    (
+        re.compile(r"^\s*\|think\|", re.IGNORECASE),
+        re.compile(r"\|/?think\|", re.IGNORECASE),
+    ),
+    (
+        re.compile(r"^\s*\[THINK\]", re.IGNORECASE),
+        re.compile(r"\[/THINK\]", re.IGNORECASE),
+    ),
 ]
 
 
@@ -21,14 +42,14 @@ class StreamingSanitizer:
 
     def __init__(
         self,
-        on_chunk: Optional[Callable[[str], Awaitable[None]]] = None,
-        on_status: Optional[Callable[[str], Awaitable[None]]] = None,
+        on_chunk: Callable[[str], Awaitable[None]] | None = None,
+        on_status: Callable[[str], Awaitable[None]] | None = None,
     ):
         self.on_chunk = on_chunk
         self.on_status = on_status
         self.is_checking_prefix: bool = True
         self.in_thinking: bool = False
-        self.close_regex: Optional[re.Pattern] = None
+        self.close_regex: re.Pattern | None = None
         self.buffer: str = ""
         self.think_buffer: str = ""
 
@@ -59,7 +80,7 @@ class StreamingSanitizer:
                     self.is_checking_prefix = False
                     self.in_thinking = True
                     self.close_regex = close_re
-                    after_open = self.buffer[m.end():]
+                    after_open = self.buffer[m.end() :]
                     self.buffer = ""
                     self.think_buffer = after_open
                     matched = True
@@ -97,7 +118,7 @@ class StreamingSanitizer:
         m = self.close_regex.search(self.think_buffer)
         if m:
             self.in_thinking = False
-            remaining = self.think_buffer[m.end():].lstrip("\r\n")
+            remaining = self.think_buffer[m.end() :].lstrip("\r\n")
             self.think_buffer = ""
             if remaining and self.on_chunk:
                 await self.on_chunk(remaining)
@@ -113,7 +134,7 @@ class StreamingSanitizer:
             # If thinking tag was never closed, look for paragraph break
             m = re.search(r"\n\n+", self.think_buffer)
             if m:
-                remaining = self.think_buffer[m.end():].strip()
+                remaining = self.think_buffer[m.end() :].strip()
                 if remaining and self.on_chunk:
                     await self.on_chunk(remaining)
             self.think_buffer = ""

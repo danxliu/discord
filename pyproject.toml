@@ -1,16 +1,26 @@
 [project]
 name = "discord"
 version = "0.1.0"
-description = "Add your description here"
+description = "A personal Discord bot with AI chat and Pelican server controls"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "discord.py",
-    "requests",
     "aiohttp",
+    "certifi",
+    "ddgs>=9.16.0",
+    "discord.py",
+    "openai>=3.19.2",
     "pydantic",
     "pydantic-settings",
-    "openai>=3.19.2",
     "trafilatura>=2.2.0",
-    "ddgs>=9.16.0",
 ]
+
+[dependency-groups]
+dev = ["ruff>=0.16.5"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP"]

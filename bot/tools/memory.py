@@ -1,4 +1,5 @@
-from typing import Any, Dict
+from typing import Any
+
 from bot.memory.user import UserMemory
 from bot.tools.base import BaseTool, ToolContext
 
@@ -17,12 +18,10 @@ class MemoryReadTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return (
-            "Read the stored persistent memory notes, background, and preferences for the current user."
-        )
+        return "Read the stored persistent memory notes, background, and preferences for the current user."
 
     @property
-    def parameters(self) -> Dict[str, Any]:
+    def parameters(self) -> dict[str, Any]:
         return {
             "type": "object",
             "properties": {},
@@ -47,12 +46,10 @@ class MemorySaveTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return (
-            "Save a new fact, note, or preference about the current user to their persistent profile."
-        )
+        return "Save a new fact, note, or preference about the current user to their persistent profile."
 
     @property
-    def parameters(self) -> Dict[str, Any]:
+    def parameters(self) -> dict[str, Any]:
         return {
             "type": "object",
             "properties": {

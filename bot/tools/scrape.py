@@ -1,6 +1,6 @@
 import asyncio
 import ssl
-from typing import Any, Dict
+from typing import Any
 from urllib.parse import urljoin
 
 import aiohttp
@@ -42,12 +42,10 @@ class WebScrapeTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return (
-            "Extract clean, readable markdown content from a specific webpage URL."
-        )
+        return "Extract clean, readable markdown content from a specific webpage URL."
 
     @property
-    def parameters(self) -> Dict[str, Any]:
+    def parameters(self) -> dict[str, Any]:
         return {
             "type": "object",
             "properties": {
@@ -97,7 +95,7 @@ class WebScrapeTool(BaseTool):
                             return f"Failed to fetch {url}: HTTP {resp.status}"
                         html = await resp.text()
                         break
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return f"Timeout error: Request to {url} timed out after 15 seconds."
         except Exception as e:
             return f"Network error while fetching {url}: {str(e)}"

@@ -1,9 +1,9 @@
 import asyncio
 import logging
 import time
-from typing import Dict, List, Optional
 
 import discord
+
 from bot.discord.messenger import split_content
 
 logger = logging.getLogger(__name__)
@@ -29,9 +29,9 @@ class MessageStreamer:
 
     def __init__(
         self,
-        target_message: Optional[discord.Message] = None,
-        interaction: Optional[discord.Interaction] = None,
-        channel: Optional[discord.abc.Messageable] = None,
+        target_message: discord.Message | None = None,
+        interaction: discord.Interaction | None = None,
+        channel: discord.abc.Messageable | None = None,
         interval: float = 1.2,
     ):
         if target_message is None and interaction is None:
@@ -40,23 +40,25 @@ class MessageStreamer:
         self.target_message = target_message
         self.interaction = interaction
         self.channel = channel or (
-            target_message.channel if target_message else getattr(interaction, "channel", None)
+            target_message.channel
+            if target_message
+            else getattr(interaction, "channel", None)
         )
         self.interval = max(0.1, interval)
 
         self.buffer: str = ""
         self._last_rendered_buffer: str = ""
-        self._rendered_chunks: Dict[int, str] = {}
+        self._rendered_chunks: dict[int, str] = {}
         # messages list tracks the discord.Message objects for chunks [0, 1, 2, ...]
         # For interaction, messages[0] is None because interaction.edit_original_response is used
-        self.messages: List[Optional[discord.Message]] = (
+        self.messages: list[discord.Message | None] = (
             [target_message] if target_message else [None]
         )
 
         self._is_active: bool = True
         self._rate_limit_until: float = 0.0
         self._lock: asyncio.Lock = asyncio.Lock()
-        self._updater_task: Optional[asyncio.Task] = asyncio.create_task(
+        self._updater_task: asyncio.Task | None = asyncio.create_task(
             self._periodic_loop()
         )
 
@@ -95,7 +97,10 @@ class MessageStreamer:
         except discord.HTTPException as e:
             if e.status == 429:
                 retry_after = getattr(e, "retry_after", 2.0) or 2.0
-                logger.warning("Discord rate limited message edit; retrying after %.2fs", retry_after)
+                logger.warning(
+                    "Discord rate limited message edit; retry delay_seconds=%.2f",
+                    retry_after,
+                )
                 self._rate_limit_until = time.monotonic() + retry_after
                 await asyncio.sleep(retry_after)
             elif e.code == 50006:
@@ -106,7 +111,7 @@ class MessageStreamer:
             logger.exception("Unexpected message edit failure")
         return False
 
-    async def _send_next_message(self, content: str) -> Optional[discord.Message]:
+    async def _send_next_message(self, content: str) -> discord.Message | None:
         """Send a new message for chunk overflow (> 2000 characters)."""
         if not content or not content.strip():
             content = "..."
@@ -127,7 +132,10 @@ class MessageStreamer:
         except discord.HTTPException as e:
             if e.status == 429:
                 retry_after = getattr(e, "retry_after", 2.0) or 2.0
-                logger.warning("Discord rate limited message send; retrying after %.2fs", retry_after)
+                logger.warning(
+                    "Discord rate limited message send; retry delay_seconds=%.2f",
+                    retry_after,
+                )
                 self._rate_limit_until = time.monotonic() + retry_after
                 await asyncio.sleep(retry_after)
             else:
@@ -176,8 +184,8 @@ class MessageStreamer:
             logger.exception("Message stream update failed")
 
     async def finalize(
-        self, final_text: Optional[str] = None
-    ) -> List[Optional[discord.Message]]:
+        self, final_text: str | None = None
+    ) -> list[discord.Message | None]:
         """Stop periodic loop and ensure the entire final response is rendered on Discord."""
         self._is_active = False
         if self._updater_task and not self._updater_task.done():

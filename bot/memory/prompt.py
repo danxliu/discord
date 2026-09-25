@@ -1,6 +1,6 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
+
 import discord
 
 from bot.tools.base import ToolRegistry
@@ -10,8 +10,8 @@ def build_system_prompt(
     prompt_path: str,
     user: discord.User | discord.Member,
     channel: discord.abc.Messageable,
-    guild: Optional[discord.Guild] = None,
-    tool_registry: Optional[ToolRegistry] = None,
+    guild: discord.Guild | None = None,
+    tool_registry: ToolRegistry | None = None,
 ) -> str:
     path = Path(prompt_path)
     base_prompt = (
@@ -22,8 +22,7 @@ def build_system_prompt(
 
     if tool_registry:
         tool_lines = [
-            f"- `{tool.name}`: {tool.description}"
-            for tool in tool_registry.get_tools()
+            f"- `{tool.name}`: {tool.description}" for tool in tool_registry.get_tools()
         ]
         tool_section = "## Available Tools & Capabilities\n" + "\n".join(tool_lines)
     else:
@@ -35,7 +34,7 @@ def build_system_prompt(
             "- `memory_save`: Save a new fact, note, or preference about the current user to their persistent profile."
         )
 
-    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    now_utc = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
     user_info = f"User: {user.display_name} (@{user.name}, ID: {user.id})"
 
     channel_name = getattr(channel, "name", "direct-message")
@@ -49,8 +48,7 @@ def build_system_prompt(
     if guild:
         guild_info = f"Server: {guild.name} (ID: {guild.id})"
         emojis = [
-            f"<{'a' if e.animated else ''}:{e.name}:{e.id}>"
-            for e in guild.emojis[:30]
+            f"<{'a' if e.animated else ''}:{e.name}:{e.id}>" for e in guild.emojis[:30]
         ]
         emoji_section = (
             f"Available Server Emojis: {' '.join(emojis)}"

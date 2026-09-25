@@ -2,8 +2,11 @@ import json
 import logging
 import re
 import time
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from collections.abc import Awaitable, Callable
+from typing import Any
+
 from openai import AsyncOpenAI
+
 from bot.agent.sanitizer import StreamingSanitizer
 from bot.tools.base import ToolContext, ToolRegistry
 
@@ -50,7 +53,7 @@ class AgenticLoop:
         return cleaned.strip()
 
     def _accumulate_tool_call_delta(
-        self, accumulated: Dict[int, Dict[str, Any]], tc_delta: Any
+        self, accumulated: dict[int, dict[str, Any]], tc_delta: Any
     ) -> None:
         idx = tc_delta.index
         if idx not in accumulated:
@@ -58,13 +61,9 @@ class AgenticLoop:
                 "id": tc_delta.id or "",
                 "type": tc_delta.type or "function",
                 "function": {
-                    "name": (
-                        tc_delta.function.name or "" if tc_delta.function else ""
-                    ),
+                    "name": (tc_delta.function.name or "" if tc_delta.function else ""),
                     "arguments": (
-                        tc_delta.function.arguments or ""
-                        if tc_delta.function
-                        else ""
+                        tc_delta.function.arguments or "" if tc_delta.function else ""
                     ),
                 },
             }
@@ -82,9 +81,9 @@ class AgenticLoop:
 
     async def _non_stream_step(
         self,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]],
-    ) -> Tuple[str, List[Dict[str, Any]]]:
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+    ) -> tuple[str, list[dict[str, Any]]]:
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
@@ -106,11 +105,11 @@ class AgenticLoop:
 
     async def _stream_step(
         self,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]],
-        on_status: Optional[Callable[[str], Awaitable[None]]],
-        on_chunk: Optional[Callable[[str], Awaitable[None]]],
-    ) -> Tuple[str, List[Dict[str, Any]]]:
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        on_status: Callable[[str], Awaitable[None]] | None,
+        on_chunk: Callable[[str], Awaitable[None]] | None,
+    ) -> tuple[str, list[dict[str, Any]]]:
         response_stream = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
@@ -118,8 +117,8 @@ class AgenticLoop:
             stream=True,
         )
 
-        accumulated_tool_calls: Dict[int, Dict[str, Any]] = {}
-        content_pieces: List[str] = []
+        accumulated_tool_calls: dict[int, dict[str, Any]] = {}
+        content_pieces: list[str] = []
         sanitizer = StreamingSanitizer(on_chunk=on_chunk, on_status=on_status)
 
         async for chunk in response_stream:
@@ -141,12 +140,11 @@ class AgenticLoop:
         await sanitizer.flush()
 
         tool_calls = [
-            accumulated_tool_calls[i]
-            for i in sorted(accumulated_tool_calls.keys())
+            accumulated_tool_calls[i] for i in sorted(accumulated_tool_calls.keys())
         ]
         return "".join(content_pieces), tool_calls
 
-    def _parse_tool_arguments(self, raw_args: Any) -> Dict[str, Any]:
+    def _parse_tool_arguments(self, raw_args: Any) -> dict[str, Any]:
         if isinstance(raw_args, dict):
             return raw_args
         try:
@@ -156,10 +154,10 @@ class AgenticLoop:
 
     async def _execute_tools(
         self,
-        tool_calls: List[Dict[str, Any]],
+        tool_calls: list[dict[str, Any]],
         context: ToolContext,
-        messages: List[Dict[str, Any]],
-        on_status: Optional[Callable[[str], Awaitable[None]]],
+        messages: list[dict[str, Any]],
+        on_status: Callable[[str], Awaitable[None]] | None,
     ) -> None:
         for tc in tool_calls:
             fn_name = tc["function"]["name"]
@@ -196,10 +194,10 @@ class AgenticLoop:
 
     async def run(
         self,
-        messages: List[Dict[str, Any]],
+        messages: list[dict[str, Any]],
         context: ToolContext,
-        on_status: Optional[Callable[[str], Awaitable[None]]] = None,
-        on_chunk: Optional[Callable[[str], Awaitable[None]]] = None,
+        on_status: Callable[[str], Awaitable[None]] | None = None,
+        on_chunk: Callable[[str], Awaitable[None]] | None = None,
     ) -> str:
         current_messages = list(messages)
         tools = self.tool_registry.get_schemas()
@@ -247,9 +245,7 @@ class AgenticLoop:
                 }
             )
 
-            await self._execute_tools(
-                tool_calls, context, current_messages, on_status
-            )
+            await self._execute_tools(tool_calls, context, current_messages, on_status)
             tool_call_count += len(tool_calls)
             iteration += 1
 

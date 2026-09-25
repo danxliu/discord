@@ -1,6 +1,8 @@
 import asyncio
-from typing import Any, Dict
+from typing import Any
+
 from ddgs import DDGS
+
 from bot.tools.base import BaseTool, ToolContext
 
 
@@ -21,7 +23,7 @@ class WebSearchTool(BaseTool):
         )
 
     @property
-    def parameters(self) -> Dict[str, Any]:
+    def parameters(self) -> dict[str, Any]:
         return {
             "type": "object",
             "properties": {

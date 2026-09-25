@@ -1,14 +1,13 @@
-from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from datetime import UTC, datetime
 
 
 class ChannelHistory:
     def __init__(self, max_turns: int = 20):
         self.max_turns = max_turns
-        self._histories: Dict[int, List[Dict[str, str]]] = {}
-        self._cleared_at: Dict[int, datetime] = {}
+        self._histories: dict[int, list[dict[str, str]]] = {}
+        self._cleared_at: dict[int, datetime] = {}
 
-    def get_history(self, channel_id: int) -> List[Dict[str, str]]:
+    def get_history(self, channel_id: int) -> list[dict[str, str]]:
         return [turn.copy() for turn in self._histories.get(channel_id, [])]
 
     def add_turn(self, channel_id: int, role: str, content: str) -> None:
@@ -25,12 +24,11 @@ class ChannelHistory:
             ]
 
     def clear(self, channel_id: int) -> bool:
-        self._cleared_at[channel_id] = datetime.now(timezone.utc)
+        self._cleared_at[channel_id] = datetime.now(UTC)
         if channel_id in self._histories:
             del self._histories[channel_id]
             return True
         return False
 
-    def get_cleared_at(self, channel_id: int) -> Optional[datetime]:
+    def get_cleared_at(self, channel_id: int) -> datetime | None:
         return self._cleared_at.get(channel_id)
-

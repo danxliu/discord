@@ -5,8 +5,9 @@ import base64
 import logging
 import mimetypes
 import re
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Union
+from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import aiohttp
@@ -62,7 +63,7 @@ def detect_image_mime(
     return default
 
 
-def _image_part(data: Union[bytes, bytearray], mime: str) -> Dict[str, Any]:
+def _image_part(data: bytes | bytearray, mime: str) -> dict[str, Any]:
     encoded = base64.b64encode(data).decode("utf-8")
     return {
         "type": "image_url",
@@ -73,7 +74,7 @@ def _image_part(data: Union[bytes, bytearray], mime: str) -> Dict[str, Any]:
 async def attachment_to_image_part(
     attachment: discord.Attachment,
     max_size_bytes: int = 20 * 1024 * 1024,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Download a Discord attachment and convert it to an OpenAI multimodal image_url part."""
     if attachment.size and attachment.size > max_size_bytes:
         logger.warning(
@@ -106,7 +107,7 @@ async def attachment_to_image_part(
 async def url_to_image_part(
     url: str,
     max_size_bytes: int = 20 * 1024 * 1024,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Download a public image URL and convert it to an image content part."""
     session = None
     try:
@@ -163,11 +164,11 @@ async def url_to_image_part(
 def extract_image_urls_from_text_and_embeds(
     content: str,
     embeds: Sequence[discord.Embed],
-    seen_urls: Optional[Set[str]] = None,
-) -> List[str]:
+    seen_urls: set[str] | None = None,
+) -> list[str]:
     """Find image URLs inside message content text and Discord embeds."""
     seen = seen_urls if seen_urls is not None else set()
-    found: List[str] = []
+    found: list[str] = []
 
     for embed in embeds:
         for u in (
@@ -192,8 +193,8 @@ async def load_images_from_message(
     msg: discord.Message,
     max_images: int = 5,
     max_size_bytes: int = 20 * 1024 * 1024,
-    seen_urls: Optional[Set[str]] = None,
-) -> List[Dict[str, Any]]:
+    seen_urls: set[str] | None = None,
+) -> list[dict[str, Any]]:
     """Extract and download images from a single message up to max_images limit."""
     if max_images <= 0:
         return []
@@ -224,12 +225,12 @@ async def load_images_from_message(
 
 def format_turn_content(
     text: str,
-    image_parts: Optional[Sequence[Dict[str, Any]]] = None,
-) -> Union[str, List[Dict[str, Any]]]:
+    image_parts: Sequence[dict[str, Any]] | None = None,
+) -> str | list[dict[str, Any]]:
     """Format turn content as a string if no images, or as a list of content parts if images are present."""
     if not image_parts:
         return text
-    parts: List[Dict[str, Any]] = []
+    parts: list[dict[str, Any]] = []
     if text:
         parts.append({"type": "text", "text": text})
     parts.extend(image_parts)
@@ -237,9 +238,9 @@ def format_turn_content(
 
 
 def merge_turn_contents(
-    c1: Union[str, List[Dict[str, Any]]],
-    c2: Union[str, List[Dict[str, Any]]],
-) -> Union[str, List[Dict[str, Any]]]:
+    c1: str | list[dict[str, Any]],
+    c2: str | list[dict[str, Any]],
+) -> str | list[dict[str, Any]]:
     """Merge two turn contents cleanly, preserving both text and images."""
     if isinstance(c1, str) and isinstance(c2, str):
         return f"{c1}\n{c2}"
@@ -268,7 +269,7 @@ def merge_turn_contents(
     return format_turn_content(combined_text, combined_images)
 
 
-def to_text_summary(content: Union[str, List[Dict[str, Any]]]) -> str:
+def to_text_summary(content: str | list[dict[str, Any]]) -> str:
     """Convert turn content into plain text for in-memory channel history or logging without large base64 data."""
     if isinstance(content, str):
         return content
@@ -300,10 +301,10 @@ def is_vision_unsupported_error(err: str) -> bool:
 
 
 def convert_messages_to_text_only(
-    messages: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     """Convert a message list containing multimodal image parts into pure text-only messages."""
-    converted: List[Dict[str, Any]] = []
+    converted: list[dict[str, Any]] = []
     for msg in messages:
         item = dict(msg)
         content = item.get("content")

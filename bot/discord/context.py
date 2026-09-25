@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import discord
 
@@ -12,7 +12,7 @@ from bot.discord.image import (
 )
 
 
-def clean_prompt(content: str, client_user: Optional[discord.ClientUser] = None) -> str:
+def clean_prompt(content: str, client_user: discord.ClientUser | None = None) -> str:
     if not content:
         return ""
     cleaned = content
@@ -46,22 +46,22 @@ def extract_message_text(msg: discord.Message) -> str:
 
 async def get_channel_context_messages(
     channel: discord.abc.Messageable,
-    client_user: Optional[discord.ClientUser],
+    client_user: discord.ClientUser | None,
     limit: int = 10,
-    before: Optional[discord.Message] = None,
-    after_timestamp: Optional[datetime] = None,
-    exclude_message_id: Optional[int] = None,
+    before: discord.Message | None = None,
+    after_timestamp: datetime | None = None,
+    exclude_message_id: int | None = None,
     max_images: int = 0,
     max_size_bytes: int = 20 * 1024 * 1024,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     if limit <= 0 or not hasattr(channel, "history"):
         return []
 
     try:
-        kwargs: Dict[str, object] = {"limit": limit}
+        kwargs: dict[str, object] = {"limit": limit}
         if before:
             kwargs["before"] = before
-        raw_messages: List[discord.Message] = []
+        raw_messages: list[discord.Message] = []
         async for msg in channel.history(**kwargs):
             raw_messages.append(msg)
         raw_messages.reverse()
@@ -77,7 +77,7 @@ async def get_channel_context_messages(
         and not (after_timestamp and msg.created_at <= after_timestamp)
     ]
 
-    msg_image_parts: Dict[int, List[Dict[str, Any]]] = {}
+    msg_image_parts: dict[int, list[dict[str, Any]]] = {}
     if max_images > 0:
         remaining = max_images
         for msg in reversed(valid_messages):
@@ -95,7 +95,7 @@ async def get_channel_context_messages(
                     msg_image_parts[msg.id] = loaded
                     remaining -= len(loaded)
 
-    raw_turns: List[Dict[str, Any]] = []
+    raw_turns: list[dict[str, Any]] = []
 
     for msg in valid_messages:
         text = extract_message_text(msg)
@@ -123,7 +123,7 @@ async def get_channel_context_messages(
     while raw_turns and raw_turns[0]["role"] == "assistant":
         raw_turns.pop(0)
 
-    merged_turns: List[Dict[str, Any]] = []
+    merged_turns: list[dict[str, Any]] = []
     for turn in raw_turns:
         if merged_turns and merged_turns[-1]["role"] == turn["role"]:
             merged_turns[-1]["content"] = merge_turn_contents(

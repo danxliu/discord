@@ -1,12 +1,11 @@
 import logging
-from typing import List, Optional
 
 import discord
 
 logger = logging.getLogger(__name__)
 
 
-def split_content(text: str, limit: int = 2000) -> List[str]:
+def split_content(text: str, limit: int = 2000) -> list[str]:
     if not text or not text.strip():
         return ["*(No response generated)*"]
     if len(text) <= limit:
@@ -49,9 +48,7 @@ def split_content(text: str, limit: int = 2000) -> List[str]:
         stripped_line = line.strip()
         is_code_fence = stripped_line.startswith("```")
 
-        next_in_code_block = (
-            not in_code_block if is_code_fence else in_code_block
-        )
+        next_in_code_block = not in_code_block if is_code_fence else in_code_block
         next_code_lang = (
             stripped_line[3:].strip()
             if is_code_fence and not in_code_block
@@ -72,7 +69,9 @@ def split_content(text: str, limit: int = 2000) -> List[str]:
             else:
                 words = line.split(" ")
                 for word in words:
-                    prefix = "" if not current_chunk or current_chunk.endswith("\n") else " "
+                    prefix = (
+                        "" if not current_chunk or current_chunk.endswith("\n") else " "
+                    )
                     append_token(prefix + word)
 
         in_code_block = next_in_code_block
@@ -92,7 +91,9 @@ class DiscordMessenger:
         except (discord.NotFound, discord.Forbidden):
             logger.debug("Could not add reaction message_id=%s", message.id)
         except discord.HTTPException:
-            logger.warning("Discord rejected reaction message_id=%s", message.id, exc_info=True)
+            logger.warning(
+                "Discord rejected reaction message_id=%s", message.id, exc_info=True
+            )
         except Exception:
             logger.exception("Unexpected reaction failure message_id=%s", message.id)
 
@@ -105,9 +106,15 @@ class DiscordMessenger:
         except (discord.NotFound, discord.Forbidden):
             logger.debug("Could not remove reaction message_id=%s", message.id)
         except discord.HTTPException:
-            logger.warning("Discord rejected reaction removal message_id=%s", message.id, exc_info=True)
+            logger.warning(
+                "Discord rejected reaction removal message_id=%s",
+                message.id,
+                exc_info=True,
+            )
         except Exception:
-            logger.exception("Unexpected reaction removal failure message_id=%s", message.id)
+            logger.exception(
+                "Unexpected reaction removal failure message_id=%s", message.id
+            )
 
     @staticmethod
     async def safe_edit(message: discord.Message, content: str) -> None:
@@ -118,16 +125,20 @@ class DiscordMessenger:
         except (discord.NotFound, discord.Forbidden):
             logger.debug("Could not edit message message_id=%s", message.id)
         except discord.HTTPException:
-            logger.warning("Discord rejected message edit message_id=%s", message.id, exc_info=True)
+            logger.warning(
+                "Discord rejected message edit message_id=%s", message.id, exc_info=True
+            )
         except Exception:
-            logger.exception("Unexpected message edit failure message_id=%s", message.id)
+            logger.exception(
+                "Unexpected message edit failure message_id=%s", message.id
+            )
 
     @staticmethod
     async def safe_send(
         channel: discord.abc.Messageable,
         content: str,
-        reply_to: Optional[discord.Message] = None,
-    ) -> Optional[discord.Message]:
+        reply_to: discord.Message | None = None,
+    ) -> discord.Message | None:
         if not content or not content.strip():
             content = "*(Empty response)*"
         try:
@@ -135,7 +146,9 @@ class DiscordMessenger:
                 return await reply_to.reply(content, mention_author=False)
             return await channel.send(content)
         except (discord.NotFound, discord.Forbidden):
-            logger.debug("Could not send message channel_id=%s", getattr(channel, "id", None))
+            logger.debug(
+                "Could not send message channel_id=%s", getattr(channel, "id", None)
+            )
         except discord.HTTPException:
             logger.warning(
                 "Discord rejected message send channel_id=%s",

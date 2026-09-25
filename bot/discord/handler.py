@@ -1,8 +1,10 @@
 import logging
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
+from collections.abc import Awaitable, Callable
+from typing import Any
 from uuid import uuid4
 
 import discord
+
 from bot.agent.loop import AgenticLoop
 from bot.discord.context import (
     clean_prompt,
@@ -75,21 +77,21 @@ async def get_referenced_message(
 
 
 async def _execute_chat_pipeline(
-    user: Union[discord.User, discord.Member],
+    user: discord.User | discord.Member,
     channel: discord.abc.Messageable,
-    guild: Optional[discord.Guild],
-    client_user: Optional[discord.ClientUser],
+    guild: discord.Guild | None,
+    client_user: discord.ClientUser | None,
     prompt: str,
     request_id: str,
-    streamer: Optional[MessageStreamer],
+    streamer: MessageStreamer | None,
     agent_loop: AgenticLoop,
     channel_history: ChannelHistory,
     on_status: Callable[[str], Awaitable[None]],
     on_error: Callable[[str], Awaitable[None]],
-    on_fallback_send: Optional[Callable[[List[str]], Awaitable[None]]] = None,
-    before_message: Optional[discord.Message] = None,
-    exclude_message_id: Optional[int] = None,
-    image_parts: Optional[List[Dict[str, Any]]] = None,
+    on_fallback_send: Callable[[list[str]], Awaitable[None]] | None = None,
+    before_message: discord.Message | None = None,
+    exclude_message_id: int | None = None,
+    image_parts: list[dict[str, Any]] | None = None,
 ) -> bool:
     channel_id = getattr(channel, "id", user.id)
     sys_prompt = build_system_prompt(
@@ -104,7 +106,7 @@ async def _execute_chat_pipeline(
     max_size_bytes = getattr(settings, "ai_max_image_size_mb", 20) * 1024 * 1024
     history_image_budget = max(0, max_images - len(image_parts or []))
 
-    history_turns: List[Dict[str, Any]] = []
+    history_turns: list[dict[str, Any]] = []
     if isinstance(channel, discord.abc.Messageable):
         history_turns = await get_channel_context_messages(
             channel=channel,
@@ -149,12 +151,19 @@ async def _execute_chat_pipeline(
             messages, context, on_status=on_status, on_chunk=on_chunk
         )
     except Exception as error:
-        logger.exception("Agent request failed request_id=%s", request_id)
         err_msg = str(error)
-        if not has_images or not is_vision_unsupported_error(err_msg):
+        vision_unsupported = is_vision_unsupported_error(err_msg)
+        if has_images and vision_unsupported:
+            logger.info(
+                "Model rejected image input; retrying without images request_id=%s",
+                request_id,
+            )
+        else:
+            logger.exception("Agent request failed request_id=%s", request_id)
+        if not has_images or not vision_unsupported:
             if streamer:
                 await streamer.stop()
-            if is_vision_unsupported_error(err_msg):
+            if vision_unsupported:
                 err_msg += (
                     f"\nNote: The configured model ({settings.ai_model}) may not "
                     "support multimodal/image inputs."
@@ -306,7 +315,7 @@ async def handle_message_event(
         await DiscordMessenger.safe_remove_reaction(message, "⏳", client_user)
         await DiscordMessenger.safe_react(message, "❌")
 
-    async def on_fallback_send(chunks: List[str]) -> None:
+    async def on_fallback_send(chunks: list[str]) -> None:
         await DiscordMessenger.safe_edit(status_msg, chunks[0])
         for chunk in chunks[1:]:
             await DiscordMessenger.safe_send(message.channel, chunk)
@@ -341,7 +350,7 @@ async def handle_chat_command(
     prompt: str,
     agent_loop: AgenticLoop,
     channel_history: ChannelHistory,
-    image: Optional[discord.Attachment] = None,
+    image: discord.Attachment | None = None,
 ) -> None:
     request_id = uuid4().hex[:12]
     await interaction.response.defer()
@@ -361,7 +370,7 @@ async def handle_chat_command(
     max_images = getattr(settings, "ai_max_context_images", 5)
     max_size_bytes = getattr(settings, "ai_max_image_size_mb", 20) * 1024 * 1024
 
-    current_image_parts: List[Dict[str, Any]] = []
+    current_image_parts: list[dict[str, Any]] = []
     if image:
         if is_image_attachment(image):
             part = await attachment_to_image_part(image, max_size_bytes=max_size_bytes)
@@ -414,12 +423,14 @@ async def handle_chat_command(
         except discord.HTTPException:
             logger.warning("Could not update chat status request_id=%s", request_id)
         except Exception:
-            logger.exception("Unexpected chat status update failure request_id=%s", request_id)
+            logger.exception(
+                "Unexpected chat status update failure request_id=%s", request_id
+            )
 
     async def on_error(err: str) -> None:
         await interaction.edit_original_response(content=f"❌ Error: {err}")
 
-    async def on_fallback_send(chunks: List[str]) -> None:
+    async def on_fallback_send(chunks: list[str]) -> None:
         await interaction.edit_original_response(content=chunks[0])
         for chunk in chunks[1:]:
             await interaction.followup.send(chunk)

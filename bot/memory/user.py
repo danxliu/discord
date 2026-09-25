@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 
@@ -54,9 +53,7 @@ class UserMemory:
                     new_after = after.rstrip() + f"\n{fact_line}\n"
                 new_content = parts[0] + category_header + new_after
             else:
-                new_content = (
-                    content.rstrip() + f"\n\n{category_header}\n{fact_line}\n"
-                )
+                new_content = content.rstrip() + f"\n\n{category_header}\n{fact_line}\n"
 
             path.write_text(new_content, encoding="utf-8")
             return f"Saved memory: '{fact.strip()}' under '{category}'."
