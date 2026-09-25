@@ -2,11 +2,9 @@
 
 import asyncio
 import base64
-import ipaddress
 import logging
 import mimetypes
 import re
-import socket
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Union
 from urllib.parse import urljoin, urlparse
@@ -14,46 +12,13 @@ from urllib.parse import urljoin, urlparse
 import aiohttp
 import discord
 
+from bot.net import is_public_url, public_connector
+
 logger = logging.getLogger(__name__)
-
-
-class _PublicResolver(aiohttp.abc.AbstractResolver):
-    def __init__(self) -> None:
-        self._resolver = aiohttp.resolver.DefaultResolver()
-
-    async def resolve(self, host: str, port: int = 0, family: int = socket.AF_INET):
-        records = await self._resolver.resolve(host, port, family)
-        if not records or any(
-            not ipaddress.ip_address(record["host"]).is_global for record in records
-        ):
-            raise OSError(f"Refusing to fetch a non-public host: {host}")
-        return records
-
-    async def close(self) -> None:
-        await self._resolver.close()
 
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 URL_REGEX = re.compile(r"https?://[^\s<>\"'()]+")
-
-
-def _is_public_url(url: str) -> bool:
-    try:
-        parsed = urlparse(url)
-    except ValueError:
-        return False
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-    ):
-        return False
-    try:
-        address = ipaddress.ip_address(parsed.hostname)
-    except ValueError:
-        return True
-    return address.is_global
 
 
 def is_image_attachment(attachment: discord.Attachment) -> bool:
@@ -146,10 +111,10 @@ async def url_to_image_part(
     session = None
     try:
         timeout = aiohttp.ClientTimeout(total=10)
-        connector = aiohttp.TCPConnector(resolver=_PublicResolver())
+        connector = public_connector()
         session = aiohttp.ClientSession(connector=connector, timeout=timeout)
         for _ in range(6):
-            if not _is_public_url(url):
+            if not is_public_url(url):
                 logger.warning("Refusing to fetch a non-public image URL")
                 return None
             async with session.get(url, allow_redirects=False) as resp:

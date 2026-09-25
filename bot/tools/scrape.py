@@ -1,9 +1,13 @@
 import asyncio
 import ssl
 from typing import Any, Dict
+from urllib.parse import urljoin
+
 import aiohttp
 import certifi
 import trafilatura
+
+from bot.net import is_public_url, public_connector
 from bot.tools.base import BaseTool, ToolContext
 
 HEADERS = {
@@ -70,17 +74,29 @@ class WebScrapeTool(BaseTool):
             max_chars = 6000
 
         ssl_ctx = ssl.create_default_context(cafile=certifi.where())
-        connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+        connector = public_connector(ssl_ctx)
         timeout = aiohttp.ClientTimeout(total=15)
 
         try:
             async with aiohttp.ClientSession(
                 headers=HEADERS, connector=connector, timeout=timeout
             ) as session:
-                async with session.get(url, allow_redirects=True) as resp:
-                    if resp.status != 200:
-                        return f"Failed to fetch {url}: HTTP {resp.status}"
-                    html = await resp.text()
+                for redirect_count in range(6):
+                    if not is_public_url(url):
+                        return "Error: Refusing to fetch a non-public URL."
+                    async with session.get(url, allow_redirects=False) as resp:
+                        if resp.status in {301, 302, 303, 307, 308}:
+                            location = resp.headers.get("Location")
+                            if not location:
+                                return f"Failed to fetch {url}: redirect has no target."
+                            if redirect_count == 5:
+                                return f"Failed to fetch {url}: too many redirects."
+                            url = urljoin(url, location)
+                            continue
+                        if resp.status != 200:
+                            return f"Failed to fetch {url}: HTTP {resp.status}"
+                        html = await resp.text()
+                        break
         except asyncio.TimeoutError:
             return f"Timeout error: Request to {url} timed out after 15 seconds."
         except Exception as e:
