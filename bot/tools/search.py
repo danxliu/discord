@@ -3,7 +3,7 @@ from typing import Any
 
 from ddgs import DDGS
 
-from bot.tools.base import BaseTool, ToolContext
+from bot.tools.base import BaseTool, ToolContext, ToolResult
 
 
 class WebSearchTool(BaseTool):
@@ -19,7 +19,7 @@ class WebSearchTool(BaseTool):
     def description(self) -> str:
         return (
             "Search the web for up-to-date information, news, or images. "
-            "Use search_type='news' for recent events, 'images' for image URLs, or 'general' for web search."
+            "Use search_type='news' for recent events, 'images' to find images and send fetched visual results to the model, or 'general' for web search."
         )
 
     @property
@@ -62,7 +62,7 @@ class WebSearchTool(BaseTool):
         search_type: str = "general",
         max_results: int = 5,
         **kwargs,
-    ) -> str:
+    ) -> str | ToolResult:
         search_type = (search_type or "general").lower().strip()
         try:
             max_results = max(1, min(int(max_results or 5), 10))
@@ -77,6 +77,7 @@ class WebSearchTool(BaseTool):
             return f"No results found for query: '{query}' ({search_type})."
 
         lines = [f"### Web Search Results for '{query}' ({search_type}):\n"]
+        image_results: list[tuple[str, str, str]] = []
         for i, item in enumerate(results, start=1):
             if search_type == "news":
                 title = item.get("title", "No Title")
@@ -94,10 +95,50 @@ class WebSearchTool(BaseTool):
                 lines.append(
                     f"{i}. [{title}]({source_url})\n   Direct Image: {image_url}\n"
                 )
+                remaining_images = max(0, context.max_images - context.image_count)
+                if image_url and len(image_results) < remaining_images:
+                    image_results.append((title, source_url, image_url))
             else:
                 title = item.get("title", "No Title")
                 href = item.get("href", "")
                 body = item.get("body", "")
                 lines.append(f"{i}. [{title}]({href})\n   {body}\n")
 
-        return "\n".join(lines).strip()
+        text_result = "\n".join(lines).strip()
+        if search_type != "images" or not image_results:
+            return text_result
+
+        # Delay import: bot.discord imports the handler, which imports bot.tools.
+        from bot.discord.image import url_to_image_part
+
+        fetched_results = await asyncio.gather(
+            *(
+                url_to_image_part(
+                    image_url, max_size_bytes=context.max_image_size_bytes
+                )
+                for _, _, image_url in image_results
+            ),
+            return_exceptions=True,
+        )
+        multimodal_content: list[dict[str, Any]] = []
+        for (title, source_url, image_url), image_part in zip(
+            image_results, fetched_results
+        ):
+            if not isinstance(image_part, dict):
+                continue
+            multimodal_content.extend(
+                [
+                    {
+                        "type": "text",
+                        "text": f"Image search result: {title}\nSource: {source_url}\nImage URL: {image_url}",
+                    },
+                    image_part,
+                ]
+            )
+
+        if not multimodal_content:
+            return text_result
+        context.image_count += sum(
+            part.get("type") == "image_url" for part in multimodal_content
+        )
+        return ToolResult(text_result, multimodal_content)

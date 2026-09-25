@@ -135,12 +135,21 @@ async def _execute_chat_pipeline(
 
     messages = [{"role": "system", "content": sys_prompt}] + all_turns
 
+    image_count = sum(
+        part.get("type") == "image_url"
+        for message in messages
+        if isinstance(message.get("content"), list)
+        for part in message["content"]
+    )
     context = ToolContext(
         user_id=user.id,
         user_name=user.name,
         channel_id=channel_id,
         guild_id=guild.id if guild else None,
         request_id=request_id,
+        max_images=max_images,
+        max_image_size_bytes=max_size_bytes,
+        image_count=image_count,
     )
 
     on_chunk = streamer.feed if streamer else None

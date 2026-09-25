@@ -7,12 +7,21 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class ToolResult:
+    content: str
+    multimodal_content: list[dict[str, Any]] | None = None
+
+
+@dataclass
 class ToolContext:
     user_id: int
     user_name: str
     channel_id: int
     guild_id: int | None = None
     request_id: str | None = None
+    max_images: int = 5
+    max_image_size_bytes: int = 20 * 1024 * 1024
+    image_count: int = 0
 
 
 class BaseTool(ABC):
@@ -37,7 +46,7 @@ class BaseTool(ABC):
         pass
 
     @abstractmethod
-    async def execute(self, context: ToolContext, **kwargs) -> str:
+    async def execute(self, context: ToolContext, **kwargs) -> str | ToolResult:
         pass
 
     def to_openai_schema(self) -> dict[str, Any]:
@@ -69,7 +78,7 @@ class ToolRegistry:
 
     async def execute(
         self, name: str, arguments: dict[str, Any], context: ToolContext
-    ) -> str:
+    ) -> str | ToolResult:
         tool = self._tools.get(name)
         if not tool:
             return f"Error: Tool '{name}' not found."

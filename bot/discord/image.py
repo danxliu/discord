@@ -144,12 +144,10 @@ async def url_to_image_part(
                 if not data:
                     return None
 
-                content_type = resp.headers.get("Content-Type", "")
-                mime = (
-                    content_type.split(";")[0].strip().lower() if content_type else None
-                )
-                if not mime or not mime.startswith("image/"):
-                    mime = detect_image_mime(data, url)
+                mime = detect_image_mime(data, default="")
+                if not mime:
+                    logger.warning("URL %s did not return a supported image", url)
+                    return None
 
                 return _image_part(data, mime)
         return None

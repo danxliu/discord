@@ -8,7 +8,7 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from bot.agent.sanitizer import StreamingSanitizer
-from bot.tools.base import ToolContext, ToolRegistry
+from bot.tools.base import ToolContext, ToolRegistry, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +159,7 @@ class AgenticLoop:
         messages: list[dict[str, Any]],
         on_status: Callable[[str], Awaitable[None]] | None,
     ) -> None:
+        multimodal_content: list[dict[str, Any]] = []
         for tc in tool_calls:
             fn_name = tc["function"]["name"]
             tool_obj = self.tool_registry.get(fn_name)
@@ -175,11 +176,12 @@ class AgenticLoop:
                 fn_name,
             )
             result = await self.tool_registry.execute(fn_name, args, context)
+            result_text = result.content if isinstance(result, ToolResult) else result
             logger.info(
                 "Tool call completed request_id=%s tool=%s success=%s duration_seconds=%.2f",
                 context.request_id,
                 fn_name,
-                not str(result).startswith("Error"),
+                not result_text.startswith("Error"),
                 time.monotonic() - started_at,
             )
 
@@ -188,9 +190,14 @@ class AgenticLoop:
                     "role": "tool",
                     "tool_call_id": tc["id"],
                     "name": fn_name,
-                    "content": str(result),
+                    "content": result_text,
                 }
             )
+            if isinstance(result, ToolResult) and result.multimodal_content:
+                multimodal_content.extend(result.multimodal_content)
+
+        if multimodal_content:
+            messages.append({"role": "user", "content": multimodal_content})
 
     async def run(
         self,
