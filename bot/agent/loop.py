@@ -1,7 +1,8 @@
 import json
 import re
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from openai import AsyncOpenAI
+from bot.agent.sanitizer import StreamingSanitizer
 from bot.tools.base import ToolContext, ToolRegistry
 
 THINK_PATTERNS = [
@@ -28,11 +29,13 @@ class AgenticLoop:
         model: str,
         tool_registry: ToolRegistry,
         max_iterations: int = 10,
+        stream: bool = True,
     ):
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self.model = model
         self.tool_registry = tool_registry
         self.max_iterations = max_iterations
+        self.stream = stream
 
     def _sanitize(self, text: str) -> str:
         if not text:
@@ -42,76 +45,177 @@ class AgenticLoop:
             cleaned = pattern.sub("", cleaned)
         return cleaned.strip()
 
+    def _accumulate_tool_call_delta(
+        self, accumulated: Dict[int, Dict[str, Any]], tc_delta: Any
+    ) -> None:
+        idx = tc_delta.index
+        if idx not in accumulated:
+            accumulated[idx] = {
+                "id": tc_delta.id or "",
+                "type": tc_delta.type or "function",
+                "function": {
+                    "name": (
+                        tc_delta.function.name or "" if tc_delta.function else ""
+                    ),
+                    "arguments": (
+                        tc_delta.function.arguments or ""
+                        if tc_delta.function
+                        else ""
+                    ),
+                },
+            }
+            return
+
+        target = accumulated[idx]
+        if tc_delta.id:
+            target["id"] += tc_delta.id
+        if tc_delta.function:
+            fn = tc_delta.function
+            if fn.name:
+                target["function"]["name"] += fn.name
+            if fn.arguments:
+                target["function"]["arguments"] += fn.arguments
+
+    async def _non_stream_step(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            tools=tools if tools else None,
+        )
+        msg = response.choices[0].message
+        tool_calls = [
+            {
+                "id": tc.id,
+                "type": tc.type,
+                "function": {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                },
+            }
+            for tc in (msg.tool_calls or [])
+        ]
+        return msg.content or "", tool_calls
+
+    async def _stream_step(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+        on_status: Optional[Callable[[str], Awaitable[None]]],
+        on_chunk: Optional[Callable[[str], Awaitable[None]]],
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        response_stream = await self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            tools=tools if tools else None,
+            stream=True,
+        )
+
+        accumulated_tool_calls: Dict[int, Dict[str, Any]] = {}
+        content_pieces: List[str] = []
+        sanitizer = StreamingSanitizer(on_chunk=on_chunk, on_status=on_status)
+
+        async for chunk in response_stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if not delta:
+                continue
+
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    self._accumulate_tool_call_delta(accumulated_tool_calls, tc)
+
+            if delta.content:
+                content_pieces.append(delta.content)
+                if not accumulated_tool_calls:
+                    await sanitizer.process(delta.content)
+
+        await sanitizer.flush()
+
+        tool_calls = [
+            accumulated_tool_calls[i]
+            for i in sorted(accumulated_tool_calls.keys())
+        ]
+        return "".join(content_pieces), tool_calls
+
+    def _parse_tool_arguments(self, raw_args: Any) -> Dict[str, Any]:
+        if isinstance(raw_args, dict):
+            return raw_args
+        try:
+            return json.loads(raw_args or "{}")
+        except Exception:
+            return {}
+
+    async def _execute_tools(
+        self,
+        tool_calls: List[Dict[str, Any]],
+        context: ToolContext,
+        messages: List[Dict[str, Any]],
+        on_status: Optional[Callable[[str], Awaitable[None]]],
+    ) -> None:
+        for tc in tool_calls:
+            fn_name = tc["function"]["name"]
+            tool_obj = self.tool_registry.get(fn_name)
+            display_name = tool_obj.display_name if tool_obj else fn_name
+
+            if on_status:
+                await on_status(f"Calling: {display_name}...")
+
+            args = self._parse_tool_arguments(tc["function"]["arguments"])
+            result = await self.tool_registry.execute(fn_name, args, context)
+
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "name": fn_name,
+                    "content": str(result),
+                }
+            )
+
     async def run(
         self,
         messages: List[Dict[str, Any]],
         context: ToolContext,
         on_status: Optional[Callable[[str], Awaitable[None]]] = None,
+        on_chunk: Optional[Callable[[str], Awaitable[None]]] = None,
     ) -> str:
         current_messages = list(messages)
         tools = self.tool_registry.get_schemas()
+        should_stream = self.stream and on_chunk is not None
         iteration = 0
 
         while iteration < self.max_iterations:
             if on_status:
                 await on_status("Thinking...")
 
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=current_messages,
-                tools=tools if tools else None,
-            )
-
-            choice = response.choices[0]
-            msg = choice.message
-
-            if not msg.tool_calls:
-                return self._sanitize(msg.content or "")
-
-            assistant_turn = {
-                "role": "assistant",
-                "content": msg.content or "",
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": tc.type,
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                    for tc in msg.tool_calls
-                ],
-            }
-            current_messages.append(assistant_turn)
-
-            for tc in msg.tool_calls:
-                fn_name = tc.function.name
-                tool_obj = self.tool_registry.get(fn_name)
-                display_name = tool_obj.display_name if tool_obj else fn_name
-
-                if on_status:
-                    await on_status(f"Calling: {display_name}...")
-
-                if isinstance(tc.function.arguments, dict):
-                    args = tc.function.arguments
-                else:
-                    try:
-                        args = json.loads(tc.function.arguments or "{}")
-                    except Exception:
-                        args = {}
-
-                result = await self.tool_registry.execute(fn_name, args, context)
-
-                current_messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "name": fn_name,
-                        "content": str(result),
-                    }
+            if should_stream:
+                content, tool_calls = await self._stream_step(
+                    current_messages, tools, on_status, on_chunk
+                )
+            else:
+                content, tool_calls = await self._non_stream_step(
+                    current_messages, tools
                 )
 
+            if not tool_calls:
+                return self._sanitize(content)
+
+            current_messages.append(
+                {
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": tool_calls,
+                }
+            )
+
+            await self._execute_tools(
+                tool_calls, context, current_messages, on_status
+            )
             iteration += 1
 
         return "Reached maximum tool iterations without completing response."

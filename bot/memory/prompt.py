@@ -23,7 +23,7 @@ def build_system_prompt(
     if tool_registry:
         tool_lines = [
             f"- `{tool.name}`: {tool.description}"
-            for tool in tool_registry._tools.values()
+            for tool in tool_registry.get_tools()
         ]
         tool_section = "## Available Tools & Capabilities\n" + "\n".join(tool_lines)
     else:

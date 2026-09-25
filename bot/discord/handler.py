@@ -1,8 +1,9 @@
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List, Optional, Union
 import discord
 from bot.agent.loop import AgenticLoop
 from bot.discord.messenger import DiscordMessenger, split_content
+from bot.discord.streamer import MessageStreamer
 from bot.memory.channel import ChannelHistory
 from bot.memory.prompt import build_system_prompt
 from bot.tools.base import ToolContext
@@ -145,6 +146,82 @@ async def get_channel_context_messages(
     return merged_turns
 
 
+async def _execute_chat_pipeline(
+    user: Union[discord.User, discord.Member],
+    channel: discord.abc.Messageable,
+    guild: Optional[discord.Guild],
+    client_user: Optional[discord.ClientUser],
+    prompt: str,
+    streamer: Optional[MessageStreamer],
+    agent_loop: AgenticLoop,
+    channel_history: ChannelHistory,
+    on_status: Callable[[str], Awaitable[None]],
+    on_error: Callable[[str], Awaitable[None]],
+    on_fallback_send: Optional[Callable[[List[str]], Awaitable[None]]] = None,
+    before_message: Optional[discord.Message] = None,
+    exclude_message_id: Optional[int] = None,
+) -> bool:
+    channel_id = getattr(channel, "id", user.id)
+    sys_prompt = build_system_prompt(
+        settings.ai_system_prompt_path,
+        user,
+        channel,
+        guild,
+        tool_registry=agent_loop.tool_registry,
+    )
+
+    history_turns: List[Dict[str, str]] = []
+    if isinstance(channel, discord.abc.Messageable):
+        history_turns = await get_channel_context_messages(
+            channel=channel,
+            client_user=client_user,
+            limit=settings.ai_channel_history_limit,
+            before=before_message,
+            after_timestamp=channel_history.get_cleared_at(channel_id),
+            exclude_message_id=exclude_message_id,
+        )
+
+    if not history_turns:
+        history_turns = channel_history.get_history(channel_id)
+
+    current_user_content = f"{user.display_name}: {prompt}"
+    all_turns = list(history_turns)
+    if all_turns and all_turns[-1]["role"] == "user":
+        all_turns[-1]["content"] += "\n" + current_user_content
+    else:
+        all_turns.append({"role": "user", "content": current_user_content})
+
+    messages = [{"role": "system", "content": sys_prompt}] + all_turns
+
+    context = ToolContext(
+        user_id=user.id,
+        user_name=user.name,
+        channel_id=channel_id,
+        guild_id=guild.id if guild else None,
+    )
+
+    on_chunk = streamer.feed if streamer else None
+
+    try:
+        answer = await agent_loop.run(
+            messages, context, on_status=on_status, on_chunk=on_chunk
+        )
+        if streamer:
+            await streamer.finalize(answer)
+        elif on_fallback_send:
+            chunks = split_content(answer)
+            await on_fallback_send(chunks)
+
+        channel_history.add_turn(channel_id, "user", current_user_content)
+        channel_history.add_turn(channel_id, "assistant", answer)
+        return True
+    except Exception as e:
+        if streamer:
+            await streamer.stop()
+        await on_error(str(e))
+        return False
+
+
 async def handle_message_event(
     message: discord.Message,
     client_user: discord.ClientUser,
@@ -160,16 +237,24 @@ async def handle_message_event(
     prompt = clean_prompt(message.content, client_user)
     if message.attachments:
         att_urls = [f"[Attachment: {a.url}]" for a in message.attachments]
-        if prompt:
-            prompt += "\n" + "\n".join(att_urls)
-        else:
-            prompt = "\n".join(att_urls)
+        prompt = (prompt + "\n" if prompt else "") + "\n".join(att_urls)
 
     if not prompt:
         if is_reply and ref_message:
             prompt = "Please respond to the referenced message."
         else:
             return
+
+    if is_reply and ref_message:
+        ref_text = clean_prompt(extract_message_text(ref_message), client_user)
+        if len(ref_text) > 300:
+            ref_text = ref_text[:297] + "..."
+        speaker = (
+            "Assistant"
+            if ref_message.author.id == client_user.id
+            else ref_message.author.display_name
+        )
+        prompt = f'(Replying to {speaker}: "{ref_text}")\n{prompt}'
 
     await DiscordMessenger.safe_react(message, "⏳")
     status_msg = await DiscordMessenger.safe_send(
@@ -179,74 +264,50 @@ async def handle_message_event(
         await DiscordMessenger.safe_remove_reaction(message, "⏳", client_user)
         return
 
-    async def on_status(text: str) -> None:
+    streamer = (
+        MessageStreamer(
+            target_message=status_msg,
+            channel=message.channel,
+            interval=settings.ai_stream_interval,
+        )
+        if settings.ai_stream_response
+        else None
+    )
+
+    async def fallback_status(text: str) -> None:
         await DiscordMessenger.safe_edit(status_msg, f"*{text}*")
 
-    sys_prompt = build_system_prompt(
-        settings.ai_system_prompt_path,
-        message.author,
-        message.channel,
-        message.guild,
-        tool_registry=agent_loop.tool_registry,
-    )
+    async def on_error(err: str) -> None:
+        await DiscordMessenger.safe_edit(status_msg, f"❌ Error: {err}")
+        await DiscordMessenger.safe_remove_reaction(message, "⏳", client_user)
+        await DiscordMessenger.safe_react(message, "❌")
 
-    history_turns: List[Dict[str, str]] = []
-    if isinstance(message.channel, discord.abc.Messageable):
-        history_turns = await get_channel_context_messages(
-            channel=message.channel,
-            client_user=client_user,
-            limit=settings.ai_channel_history_limit,
-            before=message,
-            after_timestamp=channel_history.get_cleared_at(message.channel.id),
-            exclude_message_id=status_msg.id if status_msg else None,
-        )
-
-    if not history_turns:
-        history_turns = channel_history.get_history(message.channel.id)
-
-    current_prompt = prompt
-    if is_reply and ref_message:
-        ref_text = clean_prompt(extract_message_text(ref_message), client_user)
-        if len(ref_text) > 300:
-            ref_text = ref_text[:297] + "..."
-        if ref_message.author.id == client_user.id:
-            reply_prefix = f"(Replying to Assistant: \"{ref_text}\")\n"
-        else:
-            reply_prefix = f"(Replying to {ref_message.author.display_name}: \"{ref_text}\")\n"
-        current_prompt = reply_prefix + current_prompt
-
-    current_user_content = f"{message.author.display_name}: {current_prompt}"
-    all_turns = list(history_turns)
-    if all_turns and all_turns[-1]["role"] == "user":
-        all_turns[-1]["content"] += "\n" + current_user_content
-    else:
-        all_turns.append({"role": "user", "content": current_user_content})
-
-    messages = [{"role": "system", "content": sys_prompt}] + all_turns
-
-    context = ToolContext(
-        user_id=message.author.id,
-        user_name=message.author.name,
-        channel_id=message.channel.id,
-        guild_id=message.guild.id if message.guild else None,
-    )
-
-    try:
-        answer = await agent_loop.run(messages, context, on_status=on_status)
-        chunks = split_content(answer)
+    async def on_fallback_send(chunks: List[str]) -> None:
         await DiscordMessenger.safe_edit(status_msg, chunks[0])
         for chunk in chunks[1:]:
             await DiscordMessenger.safe_send(message.channel, chunk)
 
-        channel_history.add_turn(message.channel.id, "user", current_user_content)
-        channel_history.add_turn(message.channel.id, "assistant", answer)
+    status_callback = streamer.set_status if streamer else fallback_status
 
+    success = await _execute_chat_pipeline(
+        user=message.author,
+        channel=message.channel,
+        guild=message.guild,
+        client_user=client_user,
+        prompt=prompt,
+        streamer=streamer,
+        agent_loop=agent_loop,
+        channel_history=channel_history,
+        on_status=status_callback,
+        on_error=on_error,
+        on_fallback_send=on_fallback_send,
+        before_message=message,
+        exclude_message_id=status_msg.id,
+    )
+
+    if success:
         await DiscordMessenger.safe_remove_reaction(message, "⏳", client_user)
         await DiscordMessenger.safe_react(message, "✅")
-    except Exception as e:
-        await DiscordMessenger.safe_edit(status_msg, f"❌ Error: {str(e)}")
-        await DiscordMessenger.safe_remove_reaction(message, "⏳", client_user)
-        await DiscordMessenger.safe_react(message, "❌")
 
 
 async def handle_chat_command(
@@ -257,61 +318,46 @@ async def handle_chat_command(
 ) -> None:
     await interaction.response.defer()
 
+    channel = interaction.channel or interaction.user
+    client_user = interaction.client.user if interaction.client else None
+
+    streamer = (
+        MessageStreamer(
+            interaction=interaction,
+            channel=channel if isinstance(channel, discord.abc.Messageable) else None,
+            interval=settings.ai_stream_interval,
+        )
+        if settings.ai_stream_response
+        else None
+    )
+
     async def on_status(text: str) -> None:
         try:
             await interaction.edit_original_response(content=f"*{text}*")
         except Exception:
             pass
 
-    await on_status("Thinking...")
+    async def on_error(err: str) -> None:
+        await interaction.edit_original_response(content=f"❌ Error: {err}")
 
-    channel = interaction.channel or interaction.user
-    channel_id = interaction.channel_id or interaction.user.id
-    client_user = interaction.client.user if interaction.client else None
-    sys_prompt = build_system_prompt(
-        settings.ai_system_prompt_path,
-        interaction.user,
-        channel,
-        interaction.guild,
-        tool_registry=agent_loop.tool_registry,
-    )
-
-    history_turns: List[Dict[str, str]] = []
-    if isinstance(channel, discord.abc.Messageable):
-        history_turns = await get_channel_context_messages(
-            channel=channel,
-            client_user=client_user,
-            limit=settings.ai_channel_history_limit,
-            after_timestamp=channel_history.get_cleared_at(channel_id),
-        )
-
-    if not history_turns:
-        history_turns = channel_history.get_history(channel_id)
-
-    current_user_content = f"{interaction.user.display_name}: {prompt}"
-    all_turns = list(history_turns)
-    if all_turns and all_turns[-1]["role"] == "user":
-        all_turns[-1]["content"] += "\n" + current_user_content
-    else:
-        all_turns.append({"role": "user", "content": current_user_content})
-
-    messages = [{"role": "system", "content": sys_prompt}] + all_turns
-
-    context = ToolContext(
-        user_id=interaction.user.id,
-        user_name=interaction.user.name,
-        channel_id=channel_id,
-        guild_id=interaction.guild_id,
-    )
-
-    try:
-        answer = await agent_loop.run(messages, context, on_status=on_status)
-        chunks = split_content(answer)
+    async def on_fallback_send(chunks: List[str]) -> None:
         await interaction.edit_original_response(content=chunks[0])
         for chunk in chunks[1:]:
             await interaction.followup.send(chunk)
 
-        channel_history.add_turn(channel_id, "user", current_user_content)
-        channel_history.add_turn(channel_id, "assistant", answer)
-    except Exception as e:
-        await interaction.edit_original_response(content=f"❌ Error: {str(e)}")
+    status_callback = streamer.set_status if streamer else on_status
+    await status_callback("Thinking...")
+
+    await _execute_chat_pipeline(
+        user=interaction.user,
+        channel=channel,
+        guild=interaction.guild,
+        client_user=client_user,
+        prompt=prompt,
+        streamer=streamer,
+        agent_loop=agent_loop,
+        channel_history=channel_history,
+        on_status=status_callback,
+        on_error=on_error,
+        on_fallback_send=on_fallback_send,
+    )

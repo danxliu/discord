@@ -10,59 +10,75 @@ def split_content(text: str, limit: int = 2000) -> List[str]:
         return [text]
 
     chunks = []
-    current_chunk = []
-    current_length = 0
+    current_chunk = ""
     in_code_block = False
     code_lang = ""
 
+    def push_chunk() -> None:
+        nonlocal current_chunk
+        if not current_chunk:
+            return
+        if in_code_block:
+            current_chunk += "\n```"
+        chunks.append(current_chunk)
+        current_chunk = f"```{code_lang}\n" if in_code_block else ""
+
+    def append_token(token: str) -> None:
+        nonlocal current_chunk
+        closing_fence = "\n```" if in_code_block else ""
+        if len(current_chunk) + len(token) + len(closing_fence) <= limit:
+            current_chunk += token
+            return
+
+        push_chunk()
+        while len(token) + (len("\n```") if in_code_block else 0) > limit:
+            closing_len = len("\n```") if in_code_block else 0
+            cut = limit - closing_len - len(current_chunk)
+            current_chunk += token[:cut]
+            token = token[cut:]
+            push_chunk()
+
+        current_chunk += token
+
     lines = text.split("\n")
-
     for line in lines:
-        line_len = len(line) + 1
+        line_to_add = line if not current_chunk else "\n" + line
+        stripped_line = line.strip()
+        is_code_fence = stripped_line.startswith("```")
 
-        if line.strip().startswith("```"):
-            if not in_code_block:
-                in_code_block = True
-                code_lang = line.strip()[3:].strip()
-            else:
-                in_code_block = False
-                code_lang = ""
+        next_in_code_block = (
+            not in_code_block if is_code_fence else in_code_block
+        )
+        next_code_lang = (
+            stripped_line[3:].strip()
+            if is_code_fence and not in_code_block
+            else ("" if is_code_fence else code_lang)
+        )
 
-        if current_length + line_len > (limit - 10):
-            if in_code_block:
-                current_chunk.append("```")
-
-            chunks.append("\n".join(current_chunk))
-            current_chunk = []
-            current_length = 0
-
-            if in_code_block:
-                current_chunk.append(f"```{code_lang}")
-                current_length = len(current_chunk[-1]) + 1
-
-        if line_len > limit - 20:
-            words = line.split(" ")
-            for word in words:
-                word_len = len(word) + 1
-                if current_length + word_len > (limit - 10):
-                    if in_code_block:
-                        current_chunk.append("```")
-                    chunks.append("\n".join(current_chunk))
-                    current_chunk = []
-                    current_length = 0
-                    if in_code_block:
-                        current_chunk.append(f"```{code_lang}")
-                        current_length = len(current_chunk[-1]) + 1
-                current_chunk.append(word)
-                current_length += word_len
+        closing_fence = "\n```" if in_code_block else ""
+        if len(current_chunk) + len(line_to_add) + len(closing_fence) <= limit:
+            current_chunk += line_to_add
         else:
-            current_chunk.append(line)
-            current_length += line_len
+            if current_chunk:
+                push_chunk()
+                line_to_add = line
+
+            closing_fence = "\n```" if in_code_block else ""
+            if len(current_chunk) + len(line_to_add) + len(closing_fence) <= limit:
+                current_chunk += line_to_add
+            else:
+                words = line.split(" ")
+                for word in words:
+                    prefix = "" if not current_chunk or current_chunk.endswith("\n") else " "
+                    append_token(prefix + word)
+
+        in_code_block = next_in_code_block
+        code_lang = next_code_lang
 
     if current_chunk:
-        chunks.append("\n".join(current_chunk))
+        chunks.append(current_chunk)
 
-    return chunks
+    return [c for c in chunks if c.strip()] or ["*(No response generated)*"]
 
 
 class DiscordMessenger:

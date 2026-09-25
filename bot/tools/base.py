@@ -60,6 +60,9 @@ class ToolRegistry:
     def get_schemas(self) -> List[Dict[str, Any]]:
         return [tool.to_openai_schema() for tool in self._tools.values()]
 
+    def get_tools(self) -> List[BaseTool]:
+        return list(self._tools.values())
+
     async def execute(
         self, name: str, arguments: Dict[str, Any], context: ToolContext
     ) -> str:

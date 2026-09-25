@@ -1,4 +1,5 @@
 import asyncio
+from typing import Optional
 
 import discord
 from discord import app_commands
@@ -81,6 +82,7 @@ agent_loop = AgenticLoop(
     model=settings.ai_model,
     tool_registry=tool_registry,
     max_iterations=settings.ai_max_iterations,
+    stream=settings.ai_stream_response,
 )
 
 
@@ -120,63 +122,67 @@ class ServerControlView(discord.ui.View):
 class StatusUpdater:
     def __init__(self):
         self.active_messages = {}  # msg_id -> {message, server_info, cache, expires_at}
-        self.task = None
+        self.task: Optional[asyncio.Task] = None
 
-    def add_messages(self, messages_data: dict):
-        for msg_id, data in messages_data.items():
-            self.active_messages[msg_id] = data
+    def add_messages(self, messages_data: dict) -> None:
+        self.active_messages.update(messages_data)
         if self.task is None or self.task.done():
             self.task = asyncio.create_task(self._updater_loop())
 
-    async def _updater_loop(self):
-        while self.active_messages:
-            await asyncio.sleep(5)
-            now = asyncio.get_event_loop().time()
-            expired_ids = [
-                msg_id
-                for msg_id, data in self.active_messages.items()
-                if now > data["expires_at"]
-            ]
-            for msg_id in expired_ids:
-                data = self.active_messages.pop(msg_id)
+    async def _cleanup_expired(self, now: float) -> None:
+        expired_ids = [
+            msg_id
+            for msg_id, data in self.active_messages.items()
+            if now > data["expires_at"]
+        ]
+        for msg_id in expired_ids:
+            data = self.active_messages.pop(msg_id, None)
+            if data and data.get("message"):
                 try:
                     await data["message"].delete()
                 except (discord.NotFound, discord.Forbidden):
                     pass
 
-            if not self.active_messages:
-                break
-            server_ids = {
-                data["server_info"].identifier: data["server_info"]
-                for data in self.active_messages.values()
-            }
-            fetch_tasks = [
-                pelican.get_server_stats(sid, sinfo.name)
-                for sid, sinfo in server_ids.items()
-            ]
-            fetch_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
-            stats_map = {sid: res for sid, res in zip(server_ids.keys(), fetch_results)}
-            msg_ids_to_remove = []
-            for msg_id, data in self.active_messages.items():
-                server_id = data["server_info"].identifier
-                res = stats_map[server_id]
+    async def _refresh_messages(self, now: float) -> None:
+        server_ids = {
+            data["server_info"].identifier: data["server_info"]
+            for data in self.active_messages.values()
+        }
+        fetch_tasks = [
+            pelican.get_server_stats(sid, sinfo.name)
+            for sid, sinfo in server_ids.items()
+        ]
+        fetch_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+        stats_map = dict(zip(server_ids.keys(), fetch_results))
 
-                embed = render_server_embed(
-                    data["server_info"], res, data["expires_at"], now
+        msg_ids_to_remove = []
+        for msg_id, data in self.active_messages.items():
+            server_id = data["server_info"].identifier
+            res = stats_map.get(server_id)
+
+            embed = render_server_embed(
+                data["server_info"], res, data["expires_at"], now
+            )
+            try:
+                view = ServerControlView(
+                    data["server_info"].identifier, data["server_info"].name
                 )
+                await data["message"].edit(embed=embed, view=view)
+            except discord.NotFound:
+                msg_ids_to_remove.append(msg_id)
+            except Exception:
+                pass
 
-                try:
-                    view = ServerControlView(
-                        data["server_info"].identifier, data["server_info"].name
-                    )
-                    await data["message"].edit(embed=embed, view=view)
-                except discord.NotFound:
-                    msg_ids_to_remove.append(msg_id)
-                except Exception:
-                    pass
+        for msg_id in msg_ids_to_remove:
+            self.active_messages.pop(msg_id, None)
 
-            for msg_id in msg_ids_to_remove:
-                self.active_messages.pop(msg_id, None)
+    async def _updater_loop(self) -> None:
+        while self.active_messages:
+            await asyncio.sleep(5)
+            now = asyncio.get_event_loop().time()
+            await self._cleanup_expired(now)
+            if self.active_messages:
+                await self._refresh_messages(now)
 
 
 status_updater = StatusUpdater()
