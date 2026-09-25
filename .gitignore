@@ -21,3 +21,6 @@ devenv.local.yaml
 .pre-commit-config.yaml
 
 .env
+
+# User data & memory
+data/

@@ -5,6 +5,16 @@ from discord import app_commands
 
 import pelican
 from config import settings
+from bot.agent import AgenticLoop
+from bot.discord import handle_chat_command, handle_message_event
+from bot.memory import ChannelHistory, UserMemory
+from bot.tools import (
+    MemoryReadTool,
+    MemorySaveTool,
+    ToolRegistry,
+    WebScrapeTool,
+    WebSearchTool,
+)
 
 
 def render_server_embed(
@@ -38,6 +48,7 @@ def render_server_embed(
 class Client(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
+        intents.message_content = True
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
 
@@ -49,8 +60,28 @@ class Client(discord.Client):
         print(f"Logged in as {self.user} (ID: {self.user.id})")
         print("------")
 
+    async def on_message(self, message: discord.Message):
+        await handle_message_event(message, self.user, agent_loop, channel_history)
+
 
 client = Client()
+
+user_memory = UserMemory()
+channel_history = ChannelHistory(max_turns=settings.ai_max_history_turns)
+
+tool_registry = ToolRegistry()
+tool_registry.register(WebSearchTool())
+tool_registry.register(WebScrapeTool())
+tool_registry.register(MemoryReadTool(user_memory))
+tool_registry.register(MemorySaveTool(user_memory))
+
+agent_loop = AgenticLoop(
+    api_key=settings.ai_api_key,
+    base_url=settings.ai_base_url,
+    model=settings.ai_model,
+    tool_registry=tool_registry,
+    max_iterations=settings.ai_max_iterations,
+)
 
 
 class ServerControlView(discord.ui.View):
@@ -199,6 +230,23 @@ async def servers(interaction: discord.Interaction):
         await interaction.followup.send(
             f"An error occurred while fetching the server list: {str(e)}"
         )
+
+
+@client.tree.command(name="chat", description="Chat with the AI assistant")
+@app_commands.describe(prompt="Your message or question for the AI")
+async def chat(interaction: discord.Interaction, prompt: str):
+    await handle_chat_command(interaction, prompt, agent_loop, channel_history)
+
+
+@client.tree.command(
+    name="clear", description="Clear AI conversation history for this channel"
+)
+async def clear(interaction: discord.Interaction):
+    channel_id = interaction.channel_id or interaction.user.id
+    channel_history.clear(channel_id)
+    await interaction.response.send_message(
+        "Conversation history cleared for this channel.", ephemeral=True
+    )
 
 
 def main():

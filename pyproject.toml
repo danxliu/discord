@@ -10,4 +10,7 @@ dependencies = [
     "aiohttp",
     "pydantic",
     "pydantic-settings",
+    "openai>=3.19.2",
+    "trafilatura>=2.2.0",
+    "ddgs>=9.16.0",
 ]
