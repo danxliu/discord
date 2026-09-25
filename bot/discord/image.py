@@ -20,6 +20,13 @@ logger = logging.getLogger(__name__)
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 URL_REGEX = re.compile(r"https?://[^\s<>\"'()]+")
+IMAGE_FETCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+}
 
 
 def is_image_attachment(attachment: discord.Attachment) -> bool:
@@ -28,6 +35,8 @@ def is_image_attachment(attachment: discord.Attachment) -> bool:
         mime = attachment.content_type.split(";")[0].strip().lower()
         if mime.startswith("image/"):
             return True
+    if getattr(attachment, "width", None) and getattr(attachment, "height", None):
+        return True
     ext = Path(attachment.filename).suffix.lower()
     return ext in IMAGE_EXTENSIONS
 
@@ -113,7 +122,9 @@ async def url_to_image_part(
     try:
         timeout = aiohttp.ClientTimeout(total=10)
         connector = public_connector()
-        session = aiohttp.ClientSession(connector=connector, timeout=timeout)
+        session = aiohttp.ClientSession(
+            headers=IMAGE_FETCH_HEADERS, connector=connector, timeout=timeout
+        )
         for _ in range(6):
             if not is_public_url(url):
                 logger.warning("Refusing to fetch a non-public image URL")
@@ -126,6 +137,9 @@ async def url_to_image_part(
                     url = urljoin(url, location)
                     continue
                 if resp.status != 200:
+                    logger.warning(
+                        "Image URL fetch returned HTTP %d for %s", resp.status, url
+                    )
                     return None
                 if (
                     resp.content_length is not None

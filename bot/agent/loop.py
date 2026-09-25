@@ -220,6 +220,17 @@ class AgenticLoop:
         )
 
         while iteration < self.max_iterations:
+            image_count = sum(
+                part.get("type") == "image_url"
+                for message in current_messages
+                if isinstance(message.get("content"), list)
+                for part in message["content"]
+            )
+            logger.info(
+                "Submitting model request request_id=%s image_parts=%d",
+                context.request_id,
+                image_count,
+            )
             if on_status:
                 await on_status("Thinking...")
 
