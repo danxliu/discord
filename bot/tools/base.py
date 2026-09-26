@@ -17,6 +17,7 @@ class GeneratedImage:
 class ToolResult:
     content: str
     multimodal_content: list[dict[str, Any]] | None = None
+    video_fallbacks: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
 
 @dataclass
@@ -28,6 +29,8 @@ class ToolContext:
     request_id: str | None = None
     image_count: int = 0
     current_image_parts: list[dict[str, Any]] = field(default_factory=list)
+    video_fallbacks: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    video_input_fallback_used: bool = False
     generated_images: list[GeneratedImage] = field(default_factory=list)
     user_display_name: str | None = None
     user_avatar_url: str | None = None

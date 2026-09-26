@@ -24,7 +24,7 @@ class WebScrapeTool(BaseTool):
     def description(self) -> str:
         return (
             "Fetch and read a URL based on its content type. Extracts text from HTML, "
-            "PDF, and text documents, and sends supported images as visual input."
+            "PDF and text documents, and sends supported images, GIFs, and videos as visual input."
         )
 
     @property
@@ -79,4 +79,8 @@ class WebScrapeTool(BaseTool):
         context.image_count += sum(
             part.get("type") == "image_url" for part in extracted.multimodal_content
         )
-        return ToolResult(extracted.text, extracted.multimodal_content)
+        return ToolResult(
+            extracted.text,
+            extracted.multimodal_content,
+            extracted.video_fallbacks or {},
+        )

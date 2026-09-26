@@ -1,6 +1,5 @@
 """Image extraction, validation, and encoding utilities for multimodal AI interactions."""
 
-import asyncio
 import logging
 import mimetypes
 import re
@@ -13,7 +12,13 @@ import aiohttp
 import discord
 
 from bot.net import is_public_url, public_connector
-from bot.utils.media import image_data_part
+from bot.utils.media import (
+    MediaResource,
+    extract_media_resource,
+    fetch_web_resource,
+    image_data_part,
+)
+from bot.utils.video import MAX_MEDIA_BYTES, is_animated_gif, is_video_media
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +44,13 @@ def is_image_attachment(attachment: discord.Attachment) -> bool:
         return True
     ext = Path(attachment.filename).suffix.lower()
     return ext in IMAGE_EXTENSIONS
+
+
+def is_video_attachment(attachment: discord.Attachment) -> bool:
+    return is_video_media(
+        getattr(attachment, "content_type", None) or "",
+        getattr(attachment, "filename", ""),
+    ) or Path(getattr(attachment, "filename", "")).suffix.lower() == ".gif"
 
 
 def is_image_url(url: str) -> bool:
@@ -130,6 +142,9 @@ async def url_to_image_part(
                 data = bytearray()
                 async for chunk in resp.content.iter_chunked(64 * 1024):
                     data.extend(chunk)
+                    if len(data) > MAX_MEDIA_BYTES:
+                        logger.warning("Image URL exceeded the media size limit: %s", url)
+                        return None
 
                 if not data:
                     return None
@@ -177,27 +192,111 @@ def extract_image_urls_from_text_and_embeds(
     return found
 
 
+def extract_video_urls_from_text_and_embeds(
+    content: str,
+    embeds: Sequence[discord.Embed],
+    seen_urls: set[str] | None = None,
+) -> list[str]:
+    seen = seen_urls if seen_urls is not None else set()
+    embed_urls = {getattr(embed.video, "url", None) for embed in embeds}
+    embed_urls.discard(None)
+    candidates = list(embed_urls)
+    candidates.extend(URL_REGEX.findall(content or ""))
+    found: list[str] = []
+    extensions = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".mpeg", ".mpg", ".gif"}
+    for candidate in candidates:
+        if not candidate:
+            continue
+        url = candidate.rstrip(".,!?;:")
+        try:
+            suffix = Path(urlparse(url).path).suffix.lower()
+        except ValueError:
+            continue
+        if (suffix in extensions or url in embed_urls) and url not in seen:
+            seen.add(url)
+            found.append(url)
+    return found
+
+
+async def load_media_from_message(
+    msg: discord.Message,
+    seen_urls: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+    """Extract media from a message and retain frame fallbacks for videos."""
+    seen = seen_urls if seen_urls is not None else set()
+    parts: list[dict[str, Any]] = []
+    fallbacks: dict[str, list[dict[str, Any]]] = {}
+
+    def add_note(text: str) -> None:
+        parts.append({"type": "text", "text": text})
+
+    for attachment in msg.attachments:
+        if attachment.url in seen or not (
+            is_image_attachment(attachment) or is_video_attachment(attachment)
+        ):
+            continue
+        seen.add(attachment.url)
+        try:
+            if getattr(attachment, "size", 0) > MAX_MEDIA_BYTES:
+                logger.warning("Skipping oversized Discord media filename=%s", attachment.filename)
+                if is_video_attachment(attachment):
+                    add_note(
+                        f"Video {attachment.filename} was not attached because it exceeds the 25 MB limit."
+                    )
+                continue
+            data = await attachment.read()
+            if not data or len(data) > MAX_MEDIA_BYTES:
+                if is_video_attachment(attachment):
+                    add_note(
+                        f"Video {attachment.filename} was not attached because it is empty or exceeds the 25 MB limit."
+                    )
+                continue
+            if is_video_attachment(attachment) or is_animated_gif(data):
+                extracted = await extract_media_resource(
+                    MediaResource(
+                        f"Discord attachment {attachment.filename}",
+                        getattr(attachment, "content_type", None) or "",
+                        None,
+                        data,
+                    )
+                )
+                parts.extend(extracted.multimodal_content or [])
+                if not extracted.multimodal_content and extracted.text.startswith("Could not process"):
+                    add_note(extracted.text)
+                fallbacks.update(extracted.video_fallbacks or {})
+            else:
+                parts.append(_image_part(data, detect_image_mime(data, attachment.filename)))
+        except Exception:
+            logger.exception("Failed to load Discord media filename=%s", attachment.filename)
+            if is_video_attachment(attachment):
+                add_note(f"Video {attachment.filename} could not be processed.")
+
+    video_urls = extract_video_urls_from_text_and_embeds(msg.content, msg.embeds, seen)
+    image_urls = extract_image_urls_from_text_and_embeds(msg.content, msg.embeds, seen)
+    for url in image_urls:
+        part = await url_to_image_part(url)
+        if part:
+            parts.append(part)
+    for url in video_urls:
+        try:
+            resource = await fetch_web_resource(url, max_bytes=MAX_MEDIA_BYTES)
+            extracted = await extract_media_resource(resource)
+            parts.extend(extracted.multimodal_content or [])
+            if not extracted.multimodal_content and extracted.text.startswith("Could not process"):
+                add_note(extracted.text)
+            fallbacks.update(extracted.video_fallbacks or {})
+        except Exception as error:
+            logger.warning("Failed to load linked video URL=%s error=%s", url, error)
+            add_note(f"Linked video {url} could not be loaded: {error}")
+    return parts, fallbacks
+
+
 async def load_images_from_message(
     msg: discord.Message,
     seen_urls: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Extract and download all images from a single message."""
-    seen = seen_urls if seen_urls is not None else set()
-    tasks = []
-
-    for a in msg.attachments:
-        if is_image_attachment(a) and a.url not in seen:
-            seen.add(a.url)
-            tasks.append(attachment_to_image_part(a))
-
-    for u in extract_image_urls_from_text_and_embeds(msg.content, msg.embeds, seen):
-        tasks.append(url_to_image_part(u))
-
-    if not tasks:
-        return []
-
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    return [r for r in results if isinstance(r, dict) and r.get("type") == "image_url"]
+    parts, _ = await load_media_from_message(msg, seen_urls)
+    return [part for part in parts if part.get("type") == "image_url"]
 
 
 def format_turn_content(
@@ -228,7 +327,9 @@ def merge_turn_contents(
         else "\n".join(p["text"] for p in c1 if p.get("type") == "text")
     )
     imgs1 = (
-        [] if isinstance(c1, str) else [p for p in c1 if p.get("type") == "image_url"]
+        []
+        if isinstance(c1, str)
+        else [p for p in c1 if p.get("type") in {"image_url", "video_url"}]
     )
 
     t2 = (
@@ -237,7 +338,9 @@ def merge_turn_contents(
         else "\n".join(p["text"] for p in c2 if p.get("type") == "text")
     )
     imgs2 = (
-        [] if isinstance(c2, str) else [p for p in c2 if p.get("type") == "image_url"]
+        []
+        if isinstance(c2, str)
+        else [p for p in c2 if p.get("type") in {"image_url", "video_url"}]
     )
 
     combined_text = f"{t1}\n\n{t2}".strip() if t1 and t2 else (t1 or t2)
@@ -252,8 +355,11 @@ def to_text_summary(content: str | list[dict[str, Any]]) -> str:
         return content
     texts = [p.get("text", "") for p in content if p.get("type") == "text"]
     num_images = sum(1 for p in content if p.get("type") == "image_url")
+    num_videos = sum(1 for p in content if p.get("type") == "video_url")
     if num_images > 0 and not any("[Image" in t for t in texts):
         texts.append(f"[{num_images} Image(s)]")
+    if num_videos > 0:
+        texts.append(f"[{num_videos} Video(s)]")
     return "\n".join(t for t in texts if t).strip()
 
 
@@ -275,6 +381,45 @@ def is_vision_unsupported_error(err: str) -> bool:
     return is_schema_mismatch or any(
         message in err_lower for message in unsupported_messages
     )
+
+
+def is_video_unsupported_error(err: str) -> bool:
+    err_lower = err.lower()
+    return "video_url" in err_lower or any(
+        phrase in err_lower
+        for phrase in (
+            "video input is not supported",
+            "does not support video",
+            "doesn't support video",
+            "video is not supported",
+            "unsupported video input",
+        )
+    )
+
+
+def replace_video_parts_with_fallbacks(
+    messages: list[dict[str, Any]],
+    fallbacks: dict[str, list[dict[str, Any]]],
+) -> bool:
+    replaced = False
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        new_content: list[dict[str, Any]] = []
+        for part in content:
+            if part.get("type") != "video_url":
+                new_content.append(part)
+                continue
+            url = part.get("video_url", {}).get("url")
+            frames = fallbacks.get(url) if isinstance(url, str) else None
+            if not frames:
+                new_content.append(part)
+                continue
+            new_content.extend(frames)
+            replaced = True
+        message["content"] = new_content
+    return replaced
 
 
 def convert_messages_to_text_only(

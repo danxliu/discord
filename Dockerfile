@@ -8,7 +8,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM python:3.14-slim-bookworm
 ENV PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:$PATH"
-RUN useradd -m -d /app -s /bin/bash appuser
+RUN apt-get update && apt-get install --no-install-recommends -y ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -d /app -s /bin/bash appuser
 WORKDIR /app
 COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 COPY --chown=appuser:appuser . /app

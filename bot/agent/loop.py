@@ -8,6 +8,10 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from bot.agent.sanitizer import StreamingSanitizer
+from bot.discord.image import (
+    is_video_unsupported_error,
+    replace_video_parts_with_fallbacks,
+)
 from bot.tools.base import ToolContext, ToolRegistry, ToolResult
 
 logger = logging.getLogger(__name__)
@@ -193,8 +197,10 @@ class AgenticLoop:
                     "content": result_text,
                 }
             )
-            if isinstance(result, ToolResult) and result.multimodal_content:
-                multimodal_content.extend(result.multimodal_content)
+            if isinstance(result, ToolResult):
+                context.video_fallbacks.update(result.video_fallbacks)
+                if result.multimodal_content:
+                    multimodal_content.extend(result.multimodal_content)
 
         if multimodal_content:
             messages.append({"role": "user", "content": multimodal_content})
@@ -234,14 +240,42 @@ class AgenticLoop:
             if on_status:
                 await on_status("Thinking...")
 
-            if should_stream:
-                content, tool_calls = await self._stream_step(
-                    current_messages, tools, on_status, on_chunk
+            try:
+                if should_stream:
+                    content, tool_calls = await self._stream_step(
+                        current_messages, tools, on_status, on_chunk
+                    )
+                else:
+                    content, tool_calls = await self._non_stream_step(
+                        current_messages, tools
+                    )
+            except Exception as error:
+                if (
+                    context.video_input_fallback_used
+                    or not context.video_fallbacks
+                    or not is_video_unsupported_error(str(error))
+                ):
+                    raise
+                if not replace_video_parts_with_fallbacks(
+                    current_messages, context.video_fallbacks
+                ):
+                    raise
+                context.video_input_fallback_used = True
+                logger.info(
+                    "Video input rejected; retrying with sampled frames request_id=%s error=%s",
+                    context.request_id,
+                    error,
                 )
-            else:
-                content, tool_calls = await self._non_stream_step(
-                    current_messages, tools
-                )
+                if on_status:
+                    await on_status("Video input is unsupported; retrying with sampled frames...")
+                if should_stream:
+                    content, tool_calls = await self._stream_step(
+                        current_messages, tools, on_status, on_chunk
+                    )
+                else:
+                    content, tool_calls = await self._non_stream_step(
+                        current_messages, tools
+                    )
 
             if not tool_calls:
                 answer = self._sanitize(content)

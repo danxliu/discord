@@ -5,9 +5,11 @@ import discord
 from bot.discord.attachments import attachment_to_text
 from bot.discord.image import (
     extract_image_urls_from_text_and_embeds,
+    extract_video_urls_from_text_and_embeds,
     format_turn_content,
     is_image_attachment,
-    load_images_from_message,
+    is_video_attachment,
+    load_media_from_message,
     merge_turn_contents,
 )
 
@@ -37,7 +39,9 @@ def extract_message_text(msg: discord.Message) -> str:
         if embed_parts:
             parts.append("\n".join(embed_parts))
     for attachment in msg.attachments:
-        if is_image_attachment(attachment):
+        if is_video_attachment(attachment):
+            parts.append(f"[Video: {attachment.filename}]")
+        elif is_image_attachment(attachment):
             parts.append(f"[Image: {attachment.filename}]")
         else:
             parts.append(f"[Attachment: {attachment.filename} ({attachment.url})]")
@@ -50,6 +54,7 @@ async def get_channel_context_messages(
     limit: int = 10,
     before: discord.Message | None = None,
     exclude_message_id: int | None = None,
+    video_fallbacks: dict[str, list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
     if limit <= 0 or not hasattr(channel, "history"):
         return []
@@ -78,11 +83,16 @@ async def get_channel_context_messages(
         if client_id and msg.author.id == client_id:
             continue
         if any(
-            is_image_attachment(attachment) for attachment in msg.attachments
-        ) or extract_image_urls_from_text_and_embeds(msg.content, msg.embeds):
-            loaded = await load_images_from_message(msg)
+            is_image_attachment(attachment) or is_video_attachment(attachment)
+            for attachment in msg.attachments
+        ) or extract_image_urls_from_text_and_embeds(
+            msg.content, msg.embeds
+        ) or extract_video_urls_from_text_and_embeds(msg.content, msg.embeds):
+            loaded, fallbacks = await load_media_from_message(msg)
             if loaded:
                 msg_image_parts[msg.id] = loaded
+            if video_fallbacks is not None:
+                video_fallbacks.update(fallbacks)
 
     raw_turns: list[dict[str, Any]] = []
 
@@ -97,7 +107,7 @@ async def get_channel_context_messages(
             continue
 
         for attachment in msg.attachments:
-            if is_image_attachment(attachment):
+            if is_image_attachment(attachment) or is_video_attachment(attachment):
                 continue
             attachment_content = await attachment_to_text(attachment)
             text = (

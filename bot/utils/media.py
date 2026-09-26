@@ -18,6 +18,12 @@ from PIL import Image, ImageOps
 from pypdf import PdfReader
 
 from bot.net import is_public_url, public_connector
+from bot.utils.video import (
+    MAX_MEDIA_BYTES,
+    MediaProcessingError,
+    is_animated_gif,
+    prepare_video,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +52,7 @@ class MediaResource:
 class ExtractedContent:
     text: str
     multimodal_content: list[dict[str, Any]] | None = None
+    video_fallbacks: dict[str, list[dict[str, Any]]] | None = None
 
 
 class WebFetchError(Exception):
@@ -56,6 +63,7 @@ async def fetch_web_resource(
     url: str,
     *,
     timeout_seconds: float = 15,
+    max_bytes: int = MAX_MEDIA_BYTES,
 ) -> MediaResource:
     if not is_public_url(url):
         raise WebFetchError("Refusing to fetch a non-public URL.")
@@ -88,6 +96,10 @@ async def fetch_web_resource(
                 data = bytearray()
                 async for chunk in response.content.iter_chunked(64 * 1024):
                     data.extend(chunk)
+                    if len(data) > max_bytes:
+                        raise WebFetchError(
+                            f"The response exceeds the {max_bytes // (1024 * 1024)} MB limit."
+                        )
 
                 if not data:
                     raise WebFetchError("The URL returned an empty response.")
@@ -205,6 +217,12 @@ def _media_type(resource: MediaResource) -> str:
         return image_mime
 
     content_type = resource.content_type
+    if len(resource.data) >= 12 and resource.data[4:8] == b"ftyp":
+        return "video/mp4"
+    if resource.data.startswith(b"\x1aE\xdf\xa3"):
+        return "video/webm"
+    if len(resource.data) >= 12 and resource.data[:4] == b"RIFF" and resource.data[8:12] == b"AVI ":
+        return "video/x-msvideo"
     if content_type and content_type != "application/octet-stream":
         return content_type
 
@@ -264,6 +282,29 @@ async def extract_media_resource(
 ) -> ExtractedContent:
     max_chars = max(1, int(max_chars))
     media_type = _media_type(resource)
+    animated_gif = media_type == "image/gif" and is_animated_gif(resource.data)
+    if media_type.startswith("video/") or animated_gif:
+        if not include_images:
+            return ExtractedContent(
+                f"Video input from {resource.source} ({media_type}); video data was not attached."
+            )
+        try:
+            prepared = await prepare_video(
+                resource.data,
+                media_type,
+                resource.source,
+            )
+        except MediaProcessingError as error:
+            return ExtractedContent(
+                f"Could not process video from {resource.source}: {error}"
+            )
+        video_url = prepared.part["video_url"]["url"]
+        return ExtractedContent(
+            f"Video input from {resource.source} ({media_type}; converted to MP4).",
+            [prepared.part] if include_images else None,
+            {video_url: prepared.fallback_frames},
+        )
+
     if media_type.startswith("image/"):
         image_mime = detect_image_mime(resource.data)
         if not image_mime:

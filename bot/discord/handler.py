@@ -17,8 +17,9 @@ from bot.discord.image import (
     convert_messages_to_text_only,
     format_turn_content,
     is_image_attachment,
+    is_video_attachment,
     is_vision_unsupported_error,
-    load_images_from_message,
+    load_media_from_message,
     merge_turn_contents,
 )
 from bot.discord.messenger import DiscordMessenger, split_content
@@ -113,8 +114,9 @@ async def _execute_chat_pipeline(
     on_fallback_send: Callable[[list[str]], Awaitable[None]] | None = None,
     before_message: discord.Message | None = None,
     exclude_message_id: int | None = None,
-    image_parts: list[dict[str, Any]] | None = None,
+    media_parts: list[dict[str, Any]] | None = None,
     generation_image_parts: list[dict[str, Any]] | None = None,
+    video_fallbacks: dict[str, list[dict[str, Any]]] | None = None,
     on_generated_images: Callable[[list[GeneratedImage]], Awaitable[None]]
     | None = None,
 ) -> bool:
@@ -135,11 +137,12 @@ async def _execute_chat_pipeline(
             limit=settings.ai_channel_history_limit,
             before=before_message,
             exclude_message_id=exclude_message_id,
+            video_fallbacks=video_fallbacks,
         )
 
     current_author_label = f"[{user.display_name} (@{user.name})]"
     current_user_text = f"{current_author_label}: {prompt}"
-    current_turn_content = format_turn_content(current_user_text, image_parts)
+    current_turn_content = format_turn_content(current_user_text, media_parts)
 
     all_turns = list(history_turns)
     if all_turns and all_turns[-1]["role"] == "user":
@@ -176,8 +179,9 @@ async def _execute_chat_pipeline(
         current_image_parts=list(
             generation_image_parts
             if generation_image_parts is not None
-            else image_parts or []
+            else [part for part in media_parts or [] if part.get("type") == "image_url"]
         ),
+        video_fallbacks=video_fallbacks or {},
     )
 
     async def deliver_generated_images() -> None:
@@ -298,7 +302,9 @@ async def handle_message_event(
 
     attachment_notes = []
     for attachment in message.attachments:
-        if is_image_attachment(attachment):
+        if is_video_attachment(attachment):
+            attachment_notes.append(f"[Video: {attachment.filename}]")
+        elif is_image_attachment(attachment):
             attachment_notes.append(f"[Image: {attachment.filename}]")
         else:
             attachment_content = await attachment_to_text(attachment)
@@ -320,24 +326,26 @@ async def handle_message_event(
         )
         prompt = f'(Replying to {speaker}: "{ref_text}")\n{prompt}'.strip()
     seen_urls: set[str] = set()
-    generation_image_parts = await load_images_from_message(
+    current_media_parts, video_fallbacks = await load_media_from_message(
         message,
         seen_urls=seen_urls,
     )
-    current_image_parts = list(generation_image_parts)
+    generation_image_parts = [
+        part for part in current_media_parts if part.get("type") == "image_url"
+    ]
     if ref_message:
-        current_image_parts.extend(
-            await load_images_from_message(
-                ref_message,
-                seen_urls=seen_urls,
-            )
+        referenced_parts, referenced_fallbacks = await load_media_from_message(
+            ref_message,
+            seen_urls=seen_urls,
         )
+        current_media_parts.extend(referenced_parts)
+        video_fallbacks.update(referenced_fallbacks)
 
     if not has_user_prompt:
-        if current_image_parts or attachment_notes:
-            instruction = "Please analyze the attached image or file."
-            if len(current_image_parts) > 1:
-                instruction = "Please analyze the attached images and files."
+        if current_media_parts or attachment_notes:
+            instruction = "Please analyze the attached image, GIF, video, or file."
+            if len(current_media_parts) + len(attachment_notes) > 1:
+                instruction = "Please analyze the attached images, GIFs, videos, and files."
             prompt = f"{instruction}\n{prompt}".strip()
         elif is_reply and ref_message:
             prompt = f"Please respond to the referenced message.\n{prompt}".strip()
@@ -352,7 +360,7 @@ async def handle_message_event(
         message.guild.id if message.guild else None,
         len(prompt),
         len(message.attachments),
-        len(current_image_parts),
+        len(current_media_parts),
     )
     status_msg = await DiscordMessenger.safe_send(
         message.channel, "*Thinking...*", reply_to=message
@@ -405,8 +413,9 @@ async def handle_message_event(
         on_fallback_send=on_fallback_send,
         before_message=message,
         exclude_message_id=status_msg.id,
-        image_parts=current_image_parts,
+        media_parts=current_media_parts,
         generation_image_parts=generation_image_parts,
+        video_fallbacks=video_fallbacks,
         on_generated_images=on_generated_images,
     )
 
