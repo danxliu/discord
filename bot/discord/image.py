@@ -78,21 +78,11 @@ def _image_part(data: bytes | bytearray, mime: str) -> dict[str, Any]:
 
 async def attachment_to_image_part(
     attachment: discord.Attachment,
-    max_size_bytes: int = 20 * 1024 * 1024,
 ) -> dict[str, Any] | None:
     """Download a Discord attachment and convert it to an OpenAI multimodal image_url part."""
-    if attachment.size and attachment.size > max_size_bytes:
-        logger.warning(
-            "Attachment %s exceeds size limit (%d > %d bytes)",
-            attachment.filename,
-            attachment.size,
-            max_size_bytes,
-        )
-        return None
-
     try:
         data = await attachment.read()
-        if not data or len(data) > max_size_bytes:
+        if not data:
             return None
 
         mime = (
@@ -111,7 +101,6 @@ async def attachment_to_image_part(
 
 async def url_to_image_part(
     url: str,
-    max_size_bytes: int = 20 * 1024 * 1024,
 ) -> dict[str, Any] | None:
     """Download a public image URL and convert it to an image content part."""
     session = None
@@ -137,18 +126,9 @@ async def url_to_image_part(
                         "Image URL fetch returned HTTP %d for %s", resp.status, url
                     )
                     return None
-                if (
-                    resp.content_length is not None
-                    and resp.content_length > max_size_bytes
-                ):
-                    logger.warning("Image URL %s exceeds size limit", url)
-                    return None
 
                 data = bytearray()
                 async for chunk in resp.content.iter_chunked(64 * 1024):
-                    if len(data) + len(chunk) > max_size_bytes:
-                        logger.warning("Image URL %s exceeds size limit", url)
-                        return None
                     data.extend(chunk)
 
                 if not data:
@@ -199,30 +179,19 @@ def extract_image_urls_from_text_and_embeds(
 
 async def load_images_from_message(
     msg: discord.Message,
-    max_images: int = 5,
-    max_size_bytes: int = 20 * 1024 * 1024,
     seen_urls: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Extract and download images from a single message up to max_images limit."""
-    if max_images <= 0:
-        return []
-
+    """Extract and download all images from a single message."""
     seen = seen_urls if seen_urls is not None else set()
     tasks = []
 
     for a in msg.attachments:
-        if len(tasks) >= max_images:
-            break
         if is_image_attachment(a) and a.url not in seen:
             seen.add(a.url)
-            tasks.append(attachment_to_image_part(a, max_size_bytes=max_size_bytes))
+            tasks.append(attachment_to_image_part(a))
 
-    if len(tasks) < max_images:
-        url_targets = extract_image_urls_from_text_and_embeds(
-            msg.content, msg.embeds, seen
-        )
-        for u in url_targets[: max_images - len(tasks)]:
-            tasks.append(url_to_image_part(u, max_size_bytes=max_size_bytes))
+    for u in extract_image_urls_from_text_and_embeds(msg.content, msg.embeds, seen):
+        tasks.append(url_to_image_part(u))
 
     if not tasks:
         return []

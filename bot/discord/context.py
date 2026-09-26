@@ -50,8 +50,6 @@ async def get_channel_context_messages(
     limit: int = 10,
     before: discord.Message | None = None,
     exclude_message_id: int | None = None,
-    max_images: int = 0,
-    max_size_bytes: int = 20 * 1024 * 1024,
 ) -> list[dict[str, Any]]:
     if limit <= 0 or not hasattr(channel, "history"):
         return []
@@ -76,22 +74,15 @@ async def get_channel_context_messages(
     ]
 
     msg_image_parts: dict[int, list[dict[str, Any]]] = {}
-    if max_images > 0:
-        remaining = max_images
-        for msg in reversed(valid_messages):
-            if remaining <= 0:
-                break
-            if client_id and msg.author.id == client_id:
-                continue
-            if any(
-                is_image_attachment(attachment) for attachment in msg.attachments
-            ) or extract_image_urls_from_text_and_embeds(msg.content, msg.embeds):
-                loaded = await load_images_from_message(
-                    msg, max_images=remaining, max_size_bytes=max_size_bytes
-                )
-                if loaded:
-                    msg_image_parts[msg.id] = loaded
-                    remaining -= len(loaded)
+    for msg in reversed(valid_messages):
+        if client_id and msg.author.id == client_id:
+            continue
+        if any(
+            is_image_attachment(attachment) for attachment in msg.attachments
+        ) or extract_image_urls_from_text_and_embeds(msg.content, msg.embeds):
+            loaded = await load_images_from_message(msg)
+            if loaded:
+                msg_image_parts[msg.id] = loaded
 
     raw_turns: list[dict[str, Any]] = []
 
@@ -108,10 +99,7 @@ async def get_channel_context_messages(
         for attachment in msg.attachments:
             if is_image_attachment(attachment):
                 continue
-            attachment_content = await attachment_to_text(
-                attachment,
-                max_size_bytes=max_size_bytes,
-            )
+            attachment_content = await attachment_to_text(attachment)
             text = (
                 f"{text}\n\nExtracted attachment {attachment.filename}:\n"
                 f"{attachment_content}"

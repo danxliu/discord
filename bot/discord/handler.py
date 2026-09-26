@@ -100,10 +100,6 @@ async def _execute_chat_pipeline(
         tool_registry=agent_loop.tool_registry,
     )
 
-    max_images = getattr(settings, "ai_max_context_images", 5)
-    max_size_bytes = getattr(settings, "ai_max_image_size_mb", 20) * 1024 * 1024
-    history_image_budget = max(0, max_images - len(image_parts or []))
-
     history_turns: list[dict[str, Any]] = []
     if isinstance(channel, discord.abc.Messageable):
         history_turns = await get_channel_context_messages(
@@ -112,8 +108,6 @@ async def _execute_chat_pipeline(
             limit=settings.ai_channel_history_limit,
             before=before_message,
             exclude_message_id=exclude_message_id,
-            max_images=history_image_budget,
-            max_size_bytes=max_size_bytes,
         )
 
     current_author_label = f"[{user.display_name} (@{user.name})]"
@@ -142,8 +136,6 @@ async def _execute_chat_pipeline(
         channel_id=channel_id,
         guild_id=guild.id if guild else None,
         request_id=request_id,
-        max_images=max_images,
-        max_image_size_bytes=max_size_bytes,
         image_count=image_count,
     )
 
@@ -157,14 +149,16 @@ async def _execute_chat_pipeline(
     except Exception as error:
         err_msg = str(error)
         vision_unsupported = is_vision_unsupported_error(err_msg)
-        if has_images and vision_unsupported:
+        is_empty_response = "provider returned an empty response" in err_msg.lower()
+        should_retry_text = has_images and (vision_unsupported or is_empty_response)
+        if should_retry_text:
             logger.info(
-                "Model rejected image input; retrying without images request_id=%s",
+                "Model rejected image input or provider returned empty response; retrying without images request_id=%s",
                 request_id,
             )
         else:
             logger.exception("Agent request failed request_id=%s", request_id)
-        if not has_images or not vision_unsupported:
+        if not should_retry_text:
             if streamer:
                 await streamer.stop()
             if vision_unsupported:
@@ -176,7 +170,12 @@ async def _execute_chat_pipeline(
             return False
 
         try:
-            await on_status("Model does not support images; retrying as text...")
+            status_text = (
+                "Model does not support images; retrying as text..."
+                if vision_unsupported
+                else "Image processing failed on upstream provider; retrying as text..."
+            )
+            await on_status(status_text)
             text_only_messages = convert_messages_to_text_only(messages)
             answer = await agent_loop.run(
                 text_only_messages, context, on_status=on_status, on_chunk=on_chunk
@@ -188,10 +187,16 @@ async def _execute_chat_pipeline(
             await on_error(f"{err_msg}\n(Retry as text also failed: {retry_error})")
             return False
 
-        note = (
-            f"-# *Note: `{settings.ai_model}` does not support image analysis; "
-            "responded to text only.*"
-        )
+        if vision_unsupported:
+            note = (
+                f"-# *Note: `{settings.ai_model}` does not support image analysis; "
+                "responded to text only.*"
+            )
+        else:
+            note = (
+                f"-# *Note: Upstream provider returned an empty response for `{settings.ai_model}` "
+                "when processing the image; responded to text only.*"
+            )
         answer = f"{answer}\n\n{note}".strip()
 
     if streamer:
@@ -232,18 +237,12 @@ async def handle_message_event(
     prompt = clean_prompt(message.content, client_user)
     has_user_prompt = bool(prompt)
 
-    max_images = getattr(settings, "ai_max_context_images", 5)
-    max_size_bytes = getattr(settings, "ai_max_image_size_mb", 20) * 1024 * 1024
-
     attachment_notes = []
     for attachment in message.attachments:
         if is_image_attachment(attachment):
             attachment_notes.append(f"[Image: {attachment.filename}]")
         else:
-            attachment_content = await attachment_to_text(
-                attachment,
-                max_size_bytes=max_size_bytes,
-            )
+            attachment_content = await attachment_to_text(attachment)
             attachment_notes.append(
                 f"[Attachment: {attachment.filename} ({attachment.url})]\n"
                 f"{attachment_content}"
@@ -264,16 +263,12 @@ async def handle_message_event(
     seen_urls: set[str] = set()
     current_image_parts = await load_images_from_message(
         message,
-        max_images=max_images,
-        max_size_bytes=max_size_bytes,
         seen_urls=seen_urls,
     )
-    if ref_message and len(current_image_parts) < max_images:
+    if ref_message:
         current_image_parts.extend(
             await load_images_from_message(
                 ref_message,
-                max_images=max_images - len(current_image_parts),
-                max_size_bytes=max_size_bytes,
                 seen_urls=seen_urls,
             )
         )
@@ -375,14 +370,11 @@ async def handle_chat_command(
     channel = interaction.channel or interaction.user
     client_user = interaction.client.user if interaction.client else None
 
-    max_images = getattr(settings, "ai_max_context_images", 5)
-    max_size_bytes = getattr(settings, "ai_max_image_size_mb", 20) * 1024 * 1024
-
     has_user_prompt = bool(prompt.strip())
     current_image_parts: list[dict[str, Any]] = []
     if image:
         if is_image_attachment(image):
-            part = await attachment_to_image_part(image, max_size_bytes=max_size_bytes)
+            part = await attachment_to_image_part(image)
             if part:
                 current_image_parts.append(part)
                 prompt = f"{prompt}\n[Image: {image.filename}]".strip()
@@ -391,19 +383,15 @@ async def handle_chat_command(
                     f"{prompt}\n[Attachment: {image.filename} (could not load image)]"
                 ).strip()
         else:
-            attachment_content = await attachment_to_text(
-                image,
-                max_size_bytes=max_size_bytes,
-            )
+            attachment_content = await attachment_to_text(image)
             prompt = (
                 f"{prompt}\n[Attachment: {image.filename} ({image.url})]\n"
                 f"{attachment_content}"
             ).strip()
 
-    remaining = max_images - len(current_image_parts)
-    urls = extract_image_urls_from_text_and_embeds(prompt, [])[:remaining]
+    urls = extract_image_urls_from_text_and_embeds(prompt, [])
     for url in urls:
-        part = await url_to_image_part(url, max_size_bytes=max_size_bytes)
+        part = await url_to_image_part(url)
         if part:
             current_image_parts.append(part)
 

@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import logging
 import mimetypes
 import ssl
 from dataclasses import dataclass
@@ -13,9 +14,12 @@ from urllib.parse import urljoin
 import aiohttp
 import certifi
 import trafilatura
+from PIL import Image, ImageOps
 from pypdf import PdfReader
 
 from bot.net import is_public_url, public_connector
+
+logger = logging.getLogger(__name__)
 
 FETCH_HEADERS = {
     "User-Agent": (
@@ -51,7 +55,6 @@ class WebFetchError(Exception):
 async def fetch_web_resource(
     url: str,
     *,
-    max_size_bytes: int = 20 * 1024 * 1024,
     timeout_seconds: float = 15,
 ) -> MediaResource:
     if not is_public_url(url):
@@ -81,20 +84,9 @@ async def fetch_web_resource(
                     continue
                 if response.status != 200:
                     raise WebFetchError(f"HTTP {response.status}")
-                if (
-                    response.content_length is not None
-                    and response.content_length > max_size_bytes
-                ):
-                    raise WebFetchError(
-                        f"Resource exceeds the {max_size_bytes}-byte size limit."
-                    )
 
                 data = bytearray()
                 async for chunk in response.content.iter_chunked(64 * 1024):
-                    if len(data) + len(chunk) > max_size_bytes:
-                        raise WebFetchError(
-                            f"Resource exceeds the {max_size_bytes}-byte size limit."
-                        )
                     data.extend(chunk)
 
                 if not data:
@@ -132,11 +124,75 @@ def detect_image_mime(data: bytes, default: str = "") -> str:
     return default
 
 
-def image_data_part(data: bytes, mime_type: str) -> dict[str, Any]:
-    encoded = base64.b64encode(data).decode("ascii")
+def prepare_image_for_model(
+    data: bytes | bytearray,
+    max_dimension: int = 2048,
+    jpeg_quality: int = 85,
+) -> tuple[bytes, str] | None:
+    """Validate, orient, resize, and normalize an image for LLM vision models.
+
+    Converts raw image bytes into a clean, normalized, optimized JPEG or PNG.
+    Guarantees that oversized camera photos, unhandled formats (WEBP, BMP, TIFF),
+    or corrupt payloads do not crash OpenAI/OpenRouter providers with
+    'Provider returned an empty response'.
+    """
+    if not data:
+        return None
+
+    try:
+        with Image.open(BytesIO(data)) as img:
+            try:
+                img = ImageOps.exif_transpose(img)
+            except Exception:
+                pass
+
+            if getattr(img, "is_animated", False):
+                try:
+                    img.seek(0)
+                except Exception:
+                    pass
+
+            if img.width > max_dimension or img.height > max_dimension:
+                img.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
+
+            output_buf = BytesIO()
+
+            # Preserve transparency if PNG with alpha channel
+            if img.format == "PNG" and img.mode in ("RGBA", "LA", "P"):
+                img.save(output_buf, format="PNG", optimize=True)
+                return output_buf.getvalue(), "image/png"
+
+            # If mode has transparency, composite over white background for JPEG
+            if img.mode in ("RGBA", "LA"):
+                bg = Image.new("RGB", img.size, (255, 255, 255))
+                alpha = img.split()[-1]
+                bg.paste(img, mask=alpha)
+                img = bg
+            elif img.mode != "RGB":
+                img = img.convert("RGB")
+
+            img.save(output_buf, format="JPEG", quality=jpeg_quality, optimize=True)
+            return output_buf.getvalue(), "image/jpeg"
+    except Exception as e:
+        logger.debug("Image normalization skipped or not recognized by Pillow: %s", e)
+        data_bytes = bytes(data)
+        detected = detect_image_mime(data_bytes)
+        if detected:
+            return data_bytes, detected
+        return None
+
+
+def image_data_part(data: bytes | bytearray, mime_type: str = "image/jpeg") -> dict[str, Any]:
+    prepared = prepare_image_for_model(data)
+    if prepared is not None:
+        data_bytes, final_mime = prepared
+    else:
+        data_bytes, final_mime = bytes(data), mime_type
+
+    encoded = base64.b64encode(data_bytes).decode("ascii")
     return {
         "type": "image_url",
-        "image_url": {"url": f"data:{mime_type};base64,{encoded}"},
+        "image_url": {"url": f"data:{final_mime};base64,{encoded}"},
     }
 
 

@@ -19,8 +19,6 @@ class ToolContext:
     channel_id: int
     guild_id: int | None = None
     request_id: str | None = None
-    max_images: int = 5
-    max_image_size_bytes: int = 20 * 1024 * 1024
     image_count: int = 0
 
 

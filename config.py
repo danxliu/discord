@@ -13,8 +13,6 @@ class Settings(BaseSettings):
     ai_system_prompt_path: str = "prompts/system.md"
     ai_max_iterations: int = 10
     ai_channel_history_limit: int = 10
-    ai_max_context_images: int = 5
-    ai_max_image_size_mb: int = 20
     ai_stream_response: bool = True
     ai_stream_interval: float = 1.2
     log_level: str = "INFO"

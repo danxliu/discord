@@ -59,10 +59,7 @@ class WebScrapeTool(BaseTool):
             max_chars = 6000
 
         try:
-            resource = await fetch_web_resource(
-                url,
-                max_size_bytes=context.max_image_size_bytes,
-            )
+            resource = await fetch_web_resource(url)
         except TimeoutError:
             return f"Timeout error: Request to {url} timed out."
         except WebFetchError as error:
@@ -74,7 +71,7 @@ class WebScrapeTool(BaseTool):
         extracted = await extract_media_resource(
             resource,
             max_chars=max_chars,
-            include_images=context.image_count < context.max_images,
+            include_images=True,
         )
         if not extracted.multimodal_content:
             return extracted.text

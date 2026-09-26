@@ -10,6 +10,7 @@ dependencies = [
     "ddgs>=9.16.0",
     "discord.py",
     "openai>=3.19.2",
+    "pillow>=12.3.0",
     "pydantic",
     "pydantic-settings",
     "pypdf>=5.0",
