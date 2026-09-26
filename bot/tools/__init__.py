@@ -1,5 +1,5 @@
 from bot.tools.base import BaseTool, ToolContext, ToolRegistry, ToolResult
-from bot.tools.memory import MemoryReadTool, MemorySaveTool
+from bot.tools.memory import MemoryAddTool, MemoryReadTool, MemoryRemoveTool
 from bot.tools.scrape import WebScrapeTool
 from bot.tools.search import WebSearchTool
 
@@ -11,5 +11,6 @@ __all__ = [
     "WebSearchTool",
     "WebScrapeTool",
     "MemoryReadTool",
-    "MemorySaveTool",
+    "MemoryAddTool",
+    "MemoryRemoveTool",
 ]

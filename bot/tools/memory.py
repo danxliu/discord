@@ -10,7 +10,7 @@ class MemoryReadTool(BaseTool):
 
     @property
     def name(self) -> str:
-        return "memory_read"
+        return "mem_read"
 
     @property
     def display_name(self) -> str:
@@ -22,31 +22,27 @@ class MemoryReadTool(BaseTool):
 
     @property
     def parameters(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        }
+        return {"type": "object", "properties": {}, "required": []}
 
     async def execute(self, context: ToolContext, **kwargs) -> str:
         return self._user_memory.read_memory(context.user_id)
 
 
-class MemorySaveTool(BaseTool):
+class MemoryAddTool(BaseTool):
     def __init__(self, user_memory: UserMemory):
         self._user_memory = user_memory
 
     @property
     def name(self) -> str:
-        return "memory_save"
+        return "mem_add"
 
     @property
     def display_name(self) -> str:
-        return "Memory Save"
+        return "Memory Add"
 
     @property
     def description(self) -> str:
-        return "Save a new fact, note, or preference about the current user to their persistent profile."
+        return "Add a fact, note, or preference about the current user to their persistent profile."
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -59,7 +55,7 @@ class MemorySaveTool(BaseTool):
                 },
                 "category": {
                     "type": "string",
-                    "description": "Category name (e.g. 'Facts & Preferences', 'Projects', 'Technical Setup'). Defaults to 'Facts & Preferences'.",
+                    "description": "Category name. Defaults to 'Facts & Preferences'.",
                 },
             },
             "required": ["fact"],
@@ -75,3 +71,46 @@ class MemorySaveTool(BaseTool):
         return self._user_memory.save_fact(
             context.user_id, context.user_name, fact, category
         )
+
+
+class MemoryRemoveTool(BaseTool):
+    def __init__(self, user_memory: UserMemory):
+        self._user_memory = user_memory
+
+    @property
+    def name(self) -> str:
+        return "mem_remove"
+
+    @property
+    def display_name(self) -> str:
+        return "Memory Remove"
+
+    @property
+    def description(self) -> str:
+        return "Remove an exact note from the current user's persistent profile."
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "fact": {
+                    "type": "string",
+                    "description": "The exact note text to remove",
+                },
+                "category": {
+                    "type": "string",
+                    "description": "Category to search. Defaults to 'Facts & Preferences'.",
+                },
+            },
+            "required": ["fact"],
+        }
+
+    async def execute(
+        self,
+        context: ToolContext,
+        fact: str,
+        category: str = "Facts & Preferences",
+        **kwargs,
+    ) -> str:
+        return self._user_memory.remove_fact(context.user_id, fact, category)

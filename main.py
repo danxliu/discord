@@ -10,8 +10,9 @@ from bot.agent import AgenticLoop
 from bot.discord import handle_chat_command, handle_message_event
 from bot.memory import UserMemory
 from bot.tools import (
+    MemoryAddTool,
     MemoryReadTool,
-    MemorySaveTool,
+    MemoryRemoveTool,
     ToolRegistry,
     WebScrapeTool,
     WebSearchTool,
@@ -82,7 +83,8 @@ tool_registry = ToolRegistry()
 tool_registry.register(WebSearchTool())
 tool_registry.register(WebScrapeTool())
 tool_registry.register(MemoryReadTool(user_memory))
-tool_registry.register(MemorySaveTool(user_memory))
+tool_registry.register(MemoryAddTool(user_memory))
+tool_registry.register(MemoryRemoveTool(user_memory))
 
 agent_loop = AgenticLoop(
     api_key=settings.ai_api_key,
