@@ -5,6 +5,11 @@ from bot.tools.base import (
     ToolRegistry,
     ToolResult,
 )
+from bot.tools.discord import (
+    DiscordHistorySearchTool,
+    DiscordReactionAddTool,
+    DiscordThreadCreateTool,
+)
 from bot.tools.image_gen import ImageGenTool, register_image_gen_tool
 from bot.tools.memory import MemoryAddTool, MemoryReadTool, MemoryRemoveTool
 from bot.tools.scrape import WebScrapeTool
@@ -23,4 +28,7 @@ __all__ = [
     "MemoryReadTool",
     "MemoryAddTool",
     "MemoryRemoveTool",
+    "DiscordThreadCreateTool",
+    "DiscordReactionAddTool",
+    "DiscordHistorySearchTool",
 ]

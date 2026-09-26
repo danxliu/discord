@@ -3,7 +3,6 @@ from importlib import import_module
 _EXPORTS = {
     "DiscordMessenger": ("bot.discord.messenger", "DiscordMessenger"),
     "split_content": ("bot.discord.messenger", "split_content"),
-    "handle_chat_command": ("bot.discord.handler", "handle_chat_command"),
     "handle_message_event": ("bot.discord.handler", "handle_message_event"),
     "MessageStreamer": ("bot.discord.streamer", "MessageStreamer"),
 }

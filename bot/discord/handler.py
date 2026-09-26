@@ -14,15 +14,12 @@ from bot.discord.context import (
     get_channel_context_messages,
 )
 from bot.discord.image import (
-    attachment_to_image_part,
     convert_messages_to_text_only,
-    extract_image_urls_from_text_and_embeds,
     format_turn_content,
     is_image_attachment,
     is_vision_unsupported_error,
     load_images_from_message,
     merge_turn_contents,
-    url_to_image_part,
 )
 from bot.discord.messenger import DiscordMessenger, split_content
 from bot.discord.streamer import MessageStreamer
@@ -173,6 +170,7 @@ async def _execute_chat_pipeline(
             else None
         ),
         guild_id=guild.id if guild else None,
+        triggering_message_id=before_message.id if before_message else None,
         request_id=request_id,
         image_count=image_count,
         current_image_parts=list(
@@ -419,123 +417,3 @@ async def handle_message_event(
     if success:
         await DiscordMessenger.safe_remove_reaction(message, "⏳", client_user)
         await DiscordMessenger.safe_react(message, "✅")
-
-
-async def handle_chat_command(
-    interaction: discord.Interaction,
-    prompt: str,
-    agent_loop: AgenticLoop,
-    image: discord.Attachment | None = None,
-) -> None:
-    request_id = uuid4().hex[:12]
-    await interaction.response.defer()
-    logger.info(
-        "Slash chat request received request_id=%s user_id=%s channel_id=%s guild_id=%s prompt_chars=%d image_attached=%s",
-        request_id,
-        interaction.user.id,
-        interaction.channel_id,
-        interaction.guild_id,
-        len(prompt),
-        image is not None,
-    )
-
-    channel = interaction.channel or interaction.user
-    client_user = interaction.client.user if interaction.client else None
-
-    has_user_prompt = bool(prompt.strip())
-    current_image_parts: list[dict[str, Any]] = []
-    if image:
-        if is_image_attachment(image):
-            part = await attachment_to_image_part(image)
-            if part:
-                current_image_parts.append(part)
-                prompt = f"{prompt}\n[Image: {image.filename}]".strip()
-            else:
-                prompt = (
-                    f"{prompt}\n[Attachment: {image.filename} (could not load image)]"
-                ).strip()
-        else:
-            attachment_content = await attachment_to_text(image)
-            prompt = (
-                f"{prompt}\n[Attachment: {image.filename} ({image.url})]\n"
-                f"{attachment_content}"
-            ).strip()
-
-    urls = extract_image_urls_from_text_and_embeds(prompt, [])
-    for url in urls:
-        part = await url_to_image_part(url)
-        if part:
-            current_image_parts.append(part)
-
-    if not has_user_prompt:
-        if current_image_parts or image:
-            prompt = f"Please analyze the attached image or file.\n{prompt}".strip()
-        else:
-            prompt = "Hello!"
-
-    logger.debug(
-        "Slash chat request prepared request_id=%s user_id=%s channel_id=%s guild_id=%s prompt_chars=%d images=%d",
-        request_id,
-        interaction.user.id,
-        interaction.channel_id,
-        interaction.guild_id,
-        len(prompt),
-        len(current_image_parts),
-    )
-
-    streamer = (
-        MessageStreamer(
-            interaction=interaction,
-            channel=channel if isinstance(channel, discord.abc.Messageable) else None,
-            interval=settings.ai_stream_interval,
-        )
-        if settings.ai_stream_response
-        else None
-    )
-
-    async def on_status(text: str) -> None:
-        try:
-            await interaction.edit_original_response(content=f"*{text}*")
-        except discord.HTTPException:
-            logger.warning("Could not update chat status request_id=%s", request_id)
-        except Exception:
-            logger.exception(
-                "Unexpected chat status update failure request_id=%s", request_id
-            )
-
-    async def on_error(err: str) -> None:
-        await interaction.edit_original_response(content=f"❌ Error: {err}")
-
-    async def on_fallback_send(chunks: list[str]) -> None:
-        await interaction.edit_original_response(content=chunks[0])
-        for chunk in chunks[1:]:
-            await interaction.followup.send(chunk)
-
-    async def on_generated_images(images: list[GeneratedImage]) -> None:
-        await _deliver_generated_images(
-            images,
-            lambda files: interaction.edit_original_response(
-                content=None, attachments=files
-            ),
-            lambda text: interaction.edit_original_response(content=text),
-            request_id,
-        )
-
-    status_callback = streamer.set_status if streamer else on_status
-    await status_callback("Thinking...")
-
-    await _execute_chat_pipeline(
-        user=interaction.user,
-        channel=channel,
-        guild=interaction.guild,
-        client_user=client_user,
-        prompt=prompt,
-        request_id=request_id,
-        streamer=streamer,
-        agent_loop=agent_loop,
-        on_status=status_callback,
-        on_error=on_error,
-        on_fallback_send=on_fallback_send,
-        image_parts=current_image_parts,
-        on_generated_images=on_generated_images,
-    )

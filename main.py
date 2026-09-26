@@ -7,9 +7,12 @@ from discord import app_commands
 
 import pelican
 from bot.agent import AgenticLoop
-from bot.discord import handle_chat_command, handle_message_event
+from bot.discord import handle_message_event
 from bot.memory import UserMemory
 from bot.tools import (
+    DiscordHistorySearchTool,
+    DiscordReactionAddTool,
+    DiscordThreadCreateTool,
     MemoryAddTool,
     MemoryReadTool,
     MemoryRemoveTool,
@@ -88,6 +91,9 @@ tool_registry.register(WebScrapeTool())
 tool_registry.register(MemoryReadTool(user_memory))
 tool_registry.register(MemoryAddTool(user_memory))
 tool_registry.register(MemoryRemoveTool(user_memory))
+tool_registry.register(DiscordThreadCreateTool(client))
+tool_registry.register(DiscordReactionAddTool(client))
+tool_registry.register(DiscordHistorySearchTool(client))
 register_image_gen_tool(
     tool_registry,
     model=settings.ai_image_model,
@@ -288,19 +294,6 @@ async def servers(interaction: discord.Interaction):
         await interaction.followup.send(
             f"An error occurred while fetching the server list: {str(e)}"
         )
-
-
-@client.tree.command(name="chat", description="Chat with the AI assistant")
-@app_commands.describe(
-    prompt="Your message or question for the AI",
-    image="Optional image to attach and analyze",
-)
-async def chat(
-    interaction: discord.Interaction,
-    prompt: str,
-    image: discord.Attachment | None = None,
-):
-    await handle_chat_command(interaction, prompt, agent_loop, image=image)
 
 
 def main():
