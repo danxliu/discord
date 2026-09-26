@@ -202,8 +202,8 @@ class MessageStreamer:
         await self._flush(is_final=True)
         return self.messages
 
-    async def stop(self) -> None:
-        """Cancel updater loop without performing a final edit."""
+    async def stop(self, delete_followups: bool = False) -> None:
+        """Cancel updates, optionally removing streamed continuation messages."""
         self._is_active = False
         if self._updater_task and not self._updater_task.done():
             self._updater_task.cancel()
@@ -211,3 +211,18 @@ class MessageStreamer:
                 await self._updater_task
             except asyncio.CancelledError:
                 pass
+
+        if delete_followups:
+            for message in filter(None, self.messages[1:]):
+                try:
+                    await message.delete()
+                except (discord.NotFound, discord.Forbidden):
+                    logger.debug(
+                        "Could not remove discarded stream message id=%s", message.id
+                    )
+                except discord.HTTPException:
+                    logger.warning(
+                        "Could not remove discarded stream message id=%s",
+                        message.id,
+                        exc_info=True,
+                    )

@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Awaitable, Callable
+from io import BytesIO
 from typing import Any
 from uuid import uuid4
 
@@ -26,10 +27,36 @@ from bot.discord.image import (
 from bot.discord.messenger import DiscordMessenger, split_content
 from bot.discord.streamer import MessageStreamer
 from bot.memory.prompt import build_system_prompt
-from bot.tools.base import ToolContext
+from bot.tools.base import GeneratedImage, ToolContext
 from config import settings
 
 logger = logging.getLogger(__name__)
+
+
+async def _deliver_generated_images(
+    images: list[GeneratedImage],
+    upload: Callable[[list[discord.File]], Awaitable[None]],
+    warn: Callable[[str], Awaitable[None]],
+    request_id: str,
+) -> None:
+    files: list[discord.File] = []
+    try:
+        files = [
+            discord.File(BytesIO(image.data), filename=image.filename)
+            for image in images
+        ]
+        await upload(files)
+    except Exception:
+        logger.exception("Generated image upload failed request_id=%s", request_id)
+        try:
+            await warn("I generated an image, but Discord could not attach it.")
+        except Exception:
+            logger.exception(
+                "Generated image upload warning failed request_id=%s", request_id
+            )
+    finally:
+        for file in files:
+            file.close()
 
 
 def should_respond(message: discord.Message, client_user: discord.ClientUser) -> bool:
@@ -90,6 +117,9 @@ async def _execute_chat_pipeline(
     before_message: discord.Message | None = None,
     exclude_message_id: int | None = None,
     image_parts: list[dict[str, Any]] | None = None,
+    generation_image_parts: list[dict[str, Any]] | None = None,
+    on_generated_images: Callable[[list[GeneratedImage]], Awaitable[None]]
+    | None = None,
 ) -> bool:
     channel_id = getattr(channel, "id", user.id)
     sys_prompt = build_system_prompt(
@@ -137,7 +167,22 @@ async def _execute_chat_pipeline(
         guild_id=guild.id if guild else None,
         request_id=request_id,
         image_count=image_count,
+        current_image_parts=list(
+            generation_image_parts
+            if generation_image_parts is not None
+            else image_parts or []
+        ),
     )
+
+    async def deliver_generated_images() -> None:
+        if not context.generated_images or not on_generated_images:
+            return
+        try:
+            await on_generated_images(context.generated_images)
+        except Exception:
+            logger.exception(
+                "Generated image delivery failed request_id=%s", request_id
+            )
 
     on_chunk = streamer.feed if streamer else None
 
@@ -160,13 +205,14 @@ async def _execute_chat_pipeline(
             logger.exception("Agent request failed request_id=%s", request_id)
         if not should_retry_text:
             if streamer:
-                await streamer.stop()
+                await streamer.stop(delete_followups=bool(context.generated_images))
             if vision_unsupported:
                 err_msg += (
                     f"\nNote: The configured model ({settings.ai_model}) may not "
                     "support multimodal/image inputs."
                 )
             await on_error(err_msg)
+            await deliver_generated_images()
             return False
 
         try:
@@ -183,8 +229,9 @@ async def _execute_chat_pipeline(
         except Exception as retry_error:
             logger.exception("Text-only retry failed request_id=%s", request_id)
             if streamer:
-                await streamer.stop()
+                await streamer.stop(delete_followups=bool(context.generated_images))
             await on_error(f"{err_msg}\n(Retry as text also failed: {retry_error})")
+            await deliver_generated_images()
             return False
 
         if vision_unsupported:
@@ -199,10 +246,16 @@ async def _execute_chat_pipeline(
             )
         answer = f"{answer}\n\n{note}".strip()
 
-    if streamer:
+    if context.generated_images and on_generated_images:
+        if streamer:
+            await streamer.stop(delete_followups=True)
+    elif streamer:
         await streamer.finalize(answer)
     elif on_fallback_send:
         await on_fallback_send(split_content(answer))
+
+    await deliver_generated_images()
+
     logger.info(
         "Response handling finished request_id=%s response_chars=%d streaming=%s",
         request_id,
@@ -261,10 +314,11 @@ async def handle_message_event(
         )
         prompt = f'(Replying to {speaker}: "{ref_text}")\n{prompt}'.strip()
     seen_urls: set[str] = set()
-    current_image_parts = await load_images_from_message(
+    generation_image_parts = await load_images_from_message(
         message,
         seen_urls=seen_urls,
     )
+    current_image_parts = list(generation_image_parts)
     if ref_message:
         current_image_parts.extend(
             await load_images_from_message(
@@ -325,6 +379,14 @@ async def handle_message_event(
         for chunk in chunks[1:]:
             await DiscordMessenger.safe_send(message.channel, chunk)
 
+    async def on_generated_images(images: list[GeneratedImage]) -> None:
+        await _deliver_generated_images(
+            images,
+            lambda files: status_msg.edit(content=None, attachments=files),
+            lambda text: DiscordMessenger.safe_edit(status_msg, text),
+            request_id,
+        )
+
     status_callback = streamer.set_status if streamer else fallback_status
 
     success = await _execute_chat_pipeline(
@@ -342,6 +404,8 @@ async def handle_message_event(
         before_message=message,
         exclude_message_id=status_msg.id,
         image_parts=current_image_parts,
+        generation_image_parts=generation_image_parts,
+        on_generated_images=on_generated_images,
     )
 
     if success:
@@ -439,6 +503,16 @@ async def handle_chat_command(
         for chunk in chunks[1:]:
             await interaction.followup.send(chunk)
 
+    async def on_generated_images(images: list[GeneratedImage]) -> None:
+        await _deliver_generated_images(
+            images,
+            lambda files: interaction.edit_original_response(
+                content=None, attachments=files
+            ),
+            lambda text: interaction.edit_original_response(content=text),
+            request_id,
+        )
+
     status_callback = streamer.set_status if streamer else on_status
     await status_callback("Thinking...")
 
@@ -455,4 +529,5 @@ async def handle_chat_command(
         on_error=on_error,
         on_fallback_send=on_fallback_send,
         image_parts=current_image_parts,
+        on_generated_images=on_generated_images,
     )

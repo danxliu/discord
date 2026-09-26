@@ -1,15 +1,25 @@
-from bot.tools.base import BaseTool, ToolContext, ToolRegistry, ToolResult
+from bot.tools.base import (
+    BaseTool,
+    GeneratedImage,
+    ToolContext,
+    ToolRegistry,
+    ToolResult,
+)
+from bot.tools.image_gen import ImageGenTool, register_image_gen_tool
 from bot.tools.memory import MemoryAddTool, MemoryReadTool, MemoryRemoveTool
 from bot.tools.scrape import WebScrapeTool
 from bot.tools.search import WebSearchTool
 
 __all__ = [
     "BaseTool",
+    "GeneratedImage",
     "ToolContext",
     "ToolRegistry",
     "ToolResult",
     "WebSearchTool",
     "WebScrapeTool",
+    "ImageGenTool",
+    "register_image_gen_tool",
     "MemoryReadTool",
     "MemoryAddTool",
     "MemoryRemoveTool",

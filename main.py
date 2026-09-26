@@ -16,6 +16,7 @@ from bot.tools import (
     ToolRegistry,
     WebScrapeTool,
     WebSearchTool,
+    register_image_gen_tool,
 )
 from config import settings
 
@@ -85,6 +86,12 @@ tool_registry.register(WebScrapeTool())
 tool_registry.register(MemoryReadTool(user_memory))
 tool_registry.register(MemoryAddTool(user_memory))
 tool_registry.register(MemoryRemoveTool(user_memory))
+register_image_gen_tool(
+    tool_registry,
+    model=settings.ai_image_model,
+    api_key=settings.ai_api_key,
+    base_url=settings.ai_base_url,
+)
 
 agent_loop = AgenticLoop(
     api_key=settings.ai_api_key,

@@ -1,9 +1,16 @@
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class GeneratedImage:
+    data: bytes
+    mime_type: str
+    filename: str
 
 
 @dataclass
@@ -20,6 +27,8 @@ class ToolContext:
     guild_id: int | None = None
     request_id: str | None = None
     image_count: int = 0
+    current_image_parts: list[dict[str, Any]] = field(default_factory=list)
+    generated_images: list[GeneratedImage] = field(default_factory=list)
 
 
 class BaseTool(ABC):
