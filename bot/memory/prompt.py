@@ -20,19 +20,11 @@ def build_system_prompt(
         else "You are an intelligent, helpful AI assistant operating inside Discord."
     )
 
-    if tool_registry:
-        tool_lines = [
-            f"- `{tool.name}`: {tool.description}" for tool in tool_registry.get_tools()
-        ]
-        tool_section = "## Available Tools & Capabilities\n" + "\n".join(tool_lines)
-    else:
-        tool_section = (
-            "## Available Tools & Capabilities\n"
-            "- `web_search`: Search the web for up-to-date information, news, or images.\n"
-            "- `web_scrape`: Extract clean, readable markdown content from a specific webpage URL.\n"
-            "- `memory_read`: Read persistent notes and preferences stored about the current user.\n"
-            "- `memory_save`: Save a new fact, note, or preference about the current user to their persistent profile."
-        )
+    tools = tool_registry.get_tools() if tool_registry is not None else []
+    tool_lines = [f"- `{tool.name}`: {tool.description}" for tool in tools]
+    tool_section = "## Available Tools & Capabilities\n" + (
+        "\n".join(tool_lines) if tool_lines else "No tools are currently registered."
+    )
 
     now_utc = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
