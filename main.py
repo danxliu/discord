@@ -19,6 +19,7 @@ from bot.tools import (
     ToolRegistry,
     WebScrapeTool,
     WebSearchTool,
+    register_gif_send_tool,
     register_image_gen_tool,
 )
 from config import settings
@@ -100,6 +101,7 @@ register_image_gen_tool(
     api_key=settings.ai_api_key,
     base_url=settings.ai_base_url,
 )
+register_gif_send_tool(tool_registry, settings.giphy_api_key)
 
 agent_loop = AgenticLoop(
     api_key=settings.ai_api_key,
