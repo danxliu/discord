@@ -29,6 +29,9 @@ class ToolContext:
     image_count: int = 0
     current_image_parts: list[dict[str, Any]] = field(default_factory=list)
     generated_images: list[GeneratedImage] = field(default_factory=list)
+    user_display_name: str | None = None
+    user_avatar_url: str | None = None
+    user_status: str | None = None
 
 
 class BaseTool(ABC):

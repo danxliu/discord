@@ -160,10 +160,18 @@ async def _execute_chat_pipeline(
         if isinstance(message.get("content"), list)
         for part in message["content"]
     )
+    presence_status = getattr(user, "status", None)
     context = ToolContext(
         user_id=user.id,
         user_name=user.name,
         channel_id=channel_id,
+        user_display_name=user.display_name,
+        user_avatar_url=getattr(getattr(user, "display_avatar", None), "url", None),
+        user_status=(
+            getattr(presence_status, "name", str(presence_status))
+            if presence_status is not None
+            else None
+        ),
         guild_id=guild.id if guild else None,
         request_id=request_id,
         image_count=image_count,

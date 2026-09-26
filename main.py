@@ -62,6 +62,8 @@ class Client(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
+        # Presence is privileged and must also be enabled in the Discord Developer Portal.
+        intents.presences = True
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
 

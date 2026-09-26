@@ -1,11 +1,21 @@
-from bot.discord.handler import handle_chat_command, handle_message_event
-from bot.discord.messenger import DiscordMessenger, split_content
-from bot.discord.streamer import MessageStreamer
+from importlib import import_module
 
-__all__ = [
-    "DiscordMessenger",
-    "split_content",
-    "handle_chat_command",
-    "handle_message_event",
-    "MessageStreamer",
-]
+_EXPORTS = {
+    "DiscordMessenger": ("bot.discord.messenger", "DiscordMessenger"),
+    "split_content": ("bot.discord.messenger", "split_content"),
+    "handle_chat_command": ("bot.discord.handler", "handle_chat_command"),
+    "handle_message_event": ("bot.discord.handler", "handle_message_event"),
+    "MessageStreamer": ("bot.discord.streamer", "MessageStreamer"),
+}
+
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name: str):
+    if name not in _EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    module_name, attribute_name = _EXPORTS[name]
+    attribute = getattr(import_module(module_name), attribute_name)
+    globals()[name] = attribute
+    return attribute

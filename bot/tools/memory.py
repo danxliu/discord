@@ -18,14 +18,33 @@ class MemoryReadTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Read the stored persistent memory notes, background, and preferences for the current user."
+        return "Read the current user's Discord profile details and stored persistent memory notes, background, and preferences."
 
     @property
     def parameters(self) -> dict[str, Any]:
         return {"type": "object", "properties": {}, "required": []}
 
     async def execute(self, context: ToolContext, **kwargs) -> str:
-        return self._user_memory.read_memory(context.user_id)
+        status = (
+            context.user_status
+            if context.user_status
+            else "Unavailable (presence data not available in this context)"
+        )
+        profile = "\n".join(
+            [
+                "## Discord Profile",
+                f"- Display name: {context.user_display_name or context.user_name}",
+                f"- Username: {context.user_name}",
+                f"- User ID: {context.user_id}",
+                f"- Profile: https://discord.com/users/{context.user_id}",
+                f"- Avatar: {context.user_avatar_url or 'Unavailable'}",
+                f"- Status: {status}",
+                "- Bio: Unavailable via the standard Discord bot API",
+                "- Pronouns: Unavailable via the standard Discord bot API",
+            ]
+        )
+        memory = self._user_memory.read_memory(context.user_id)
+        return f"{profile}\n\n## Stored Memory\n{memory}"
 
 
 class MemoryAddTool(BaseTool):
