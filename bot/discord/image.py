@@ -1,7 +1,6 @@
 """Image extraction, validation, and encoding utilities for multimodal AI interactions."""
 
 import asyncio
-import base64
 import logging
 import mimetypes
 import re
@@ -14,6 +13,7 @@ import aiohttp
 import discord
 
 from bot.net import is_public_url, public_connector
+from bot.utils.media import image_data_part
 
 logger = logging.getLogger(__name__)
 
@@ -73,11 +73,7 @@ def detect_image_mime(
 
 
 def _image_part(data: bytes | bytearray, mime: str) -> dict[str, Any]:
-    encoded = base64.b64encode(data).decode("utf-8")
-    return {
-        "type": "image_url",
-        "image_url": {"url": f"data:{mime};base64,{encoded}"},
-    }
+    return image_data_part(data, mime)
 
 
 async def attachment_to_image_part(

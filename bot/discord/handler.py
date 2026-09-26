@@ -6,6 +6,7 @@ from uuid import uuid4
 import discord
 
 from bot.agent.loop import AgenticLoop
+from bot.discord.attachments import attachment_to_text
 from bot.discord.context import (
     clean_prompt,
     extract_message_text,
@@ -238,16 +239,26 @@ async def handle_message_event(
     ref_message = await get_referenced_message(message) if is_reply else None
 
     prompt = clean_prompt(message.content, client_user)
+    has_user_prompt = bool(prompt)
 
     max_images = getattr(settings, "ai_max_context_images", 5)
     max_size_bytes = getattr(settings, "ai_max_image_size_mb", 20) * 1024 * 1024
 
+    attachment_notes = []
     for attachment in message.attachments:
         if is_image_attachment(attachment):
-            attachment_text = f"[Image: {attachment.filename}]"
+            attachment_notes.append(f"[Image: {attachment.filename}]")
         else:
-            attachment_text = f"[Attachment: {attachment.filename} ({attachment.url})]"
-        prompt = f"{prompt}\n{attachment_text}".strip()
+            attachment_content = await attachment_to_text(
+                attachment,
+                max_size_bytes=max_size_bytes,
+            )
+            attachment_notes.append(
+                f"[Attachment: {attachment.filename} ({attachment.url})]\n"
+                f"{attachment_content}"
+            )
+    if attachment_notes:
+        prompt = "\n".join(part for part in [prompt, *attachment_notes] if part)
 
     if is_reply and ref_message:
         ref_text = clean_prompt(extract_message_text(ref_message), client_user)
@@ -276,15 +287,14 @@ async def handle_message_event(
             )
         )
 
-    if not prompt.strip():
-        if current_image_parts:
-            prompt = (
-                "Please analyze and describe this image."
-                if len(current_image_parts) == 1
-                else "Please analyze and describe these images."
-            )
+    if not has_user_prompt:
+        if current_image_parts or attachment_notes:
+            instruction = "Please analyze the attached image or file."
+            if len(current_image_parts) > 1:
+                instruction = "Please analyze the attached images and files."
+            prompt = f"{instruction}\n{prompt}".strip()
         elif is_reply and ref_message:
-            prompt = "Please respond to the referenced message."
+            prompt = f"Please respond to the referenced message.\n{prompt}".strip()
         else:
             return
 
@@ -379,6 +389,7 @@ async def handle_chat_command(
     max_images = getattr(settings, "ai_max_context_images", 5)
     max_size_bytes = getattr(settings, "ai_max_image_size_mb", 20) * 1024 * 1024
 
+    has_user_prompt = bool(prompt.strip())
     current_image_parts: list[dict[str, Any]] = []
     if image:
         if is_image_attachment(image):
@@ -391,7 +402,14 @@ async def handle_chat_command(
                     f"{prompt}\n[Attachment: {image.filename} (could not load image)]"
                 ).strip()
         else:
-            prompt = f"{prompt}\n[Attachment: {image.filename} ({image.url})]".strip()
+            attachment_content = await attachment_to_text(
+                image,
+                max_size_bytes=max_size_bytes,
+            )
+            prompt = (
+                f"{prompt}\n[Attachment: {image.filename} ({image.url})]\n"
+                f"{attachment_content}"
+            ).strip()
 
     remaining = max_images - len(current_image_parts)
     urls = extract_image_urls_from_text_and_embeds(prompt, [])[:remaining]
@@ -400,9 +418,9 @@ async def handle_chat_command(
         if part:
             current_image_parts.append(part)
 
-    if not prompt or not prompt.strip():
-        if current_image_parts:
-            prompt = "Please analyze and describe this image."
+    if not has_user_prompt:
+        if current_image_parts or image:
+            prompt = f"Please analyze the attached image or file.\n{prompt}".strip()
         else:
             prompt = "Hello!"
 

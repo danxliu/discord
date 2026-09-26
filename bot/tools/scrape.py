@@ -1,34 +1,14 @@
-import asyncio
-import ssl
+import logging
 from typing import Any
-from urllib.parse import urljoin
 
-import aiohttp
-import certifi
-import trafilatura
+from bot.tools.base import BaseTool, ToolContext, ToolResult
+from bot.utils.media import (
+    WebFetchError,
+    extract_media_resource,
+    fetch_web_resource,
+)
 
-from bot.net import is_public_url, public_connector
-from bot.tools.base import BaseTool, ToolContext
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-    ),
-    "Accept": (
-        "text/html,application/xhtml+xml,application/xml;q=0.9,"
-        "image/avif,image/webp,*/*;q=0.8"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-    "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1",
-}
+logger = logging.getLogger(__name__)
 
 
 class WebScrapeTool(BaseTool):
@@ -42,7 +22,10 @@ class WebScrapeTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Extract clean, readable markdown content from a specific webpage URL."
+        return (
+            "Fetch and read a URL based on its content type. Extracts text from HTML, "
+            "PDF, and text documents, and sends supported images as visual input."
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -51,15 +34,19 @@ class WebScrapeTool(BaseTool):
             "properties": {
                 "url": {
                     "type": "string",
-                    "description": "The URL of the webpage to scrape and read",
-                }
+                    "description": "The URL of the webpage or file to read",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Maximum extracted text characters (1-20000, default 6000)",
+                },
             },
             "required": ["url"],
         }
 
     async def execute(
         self, context: ToolContext, url: str, max_chars: int = 6000, **kwargs
-    ) -> str:
+    ) -> str | ToolResult:
         if not url or not url.strip():
             return "Error: No URL provided to scrape."
         url = url.strip()
@@ -67,54 +54,32 @@ class WebScrapeTool(BaseTool):
             url = f"https://{url}"
 
         try:
-            max_chars = int(max_chars if max_chars is not None else 6000)
+            max_chars = max(1, min(int(max_chars), 20_000))
         except (ValueError, TypeError):
             max_chars = 6000
 
-        ssl_ctx = ssl.create_default_context(cafile=certifi.where())
-        connector = public_connector(ssl_ctx)
-        timeout = aiohttp.ClientTimeout(total=15)
-
         try:
-            async with aiohttp.ClientSession(
-                headers=HEADERS, connector=connector, timeout=timeout
-            ) as session:
-                for redirect_count in range(6):
-                    if not is_public_url(url):
-                        return "Error: Refusing to fetch a non-public URL."
-                    async with session.get(url, allow_redirects=False) as resp:
-                        if resp.status in {301, 302, 303, 307, 308}:
-                            location = resp.headers.get("Location")
-                            if not location:
-                                return f"Failed to fetch {url}: redirect has no target."
-                            if redirect_count == 5:
-                                return f"Failed to fetch {url}: too many redirects."
-                            url = urljoin(url, location)
-                            continue
-                        if resp.status != 200:
-                            return f"Failed to fetch {url}: HTTP {resp.status}"
-                        html = await resp.text()
-                        break
-        except TimeoutError:
-            return f"Timeout error: Request to {url} timed out after 15 seconds."
-        except Exception as e:
-            return f"Network error while fetching {url}: {str(e)}"
-
-        extracted = await asyncio.to_thread(
-            trafilatura.extract,
-            html,
-            output_format="markdown",
-            include_links=True,
-        )
-
-        if not extracted or not extracted.strip():
-            return f"Could not extract readable main content from {url}."
-
-        cleaned = extracted.strip()
-        if len(cleaned) > max_chars:
-            cleaned = (
-                cleaned[:max_chars]
-                + f"\n\n[Content truncated at {max_chars} characters]"
+            resource = await fetch_web_resource(
+                url,
+                max_size_bytes=context.max_image_size_bytes,
             )
+        except TimeoutError:
+            return f"Timeout error: Request to {url} timed out."
+        except WebFetchError as error:
+            return f"Failed to fetch {url}: {error}"
+        except Exception as error:
+            logger.exception("Failed to fetch web resource url=%s", url)
+            return f"Network error while fetching {url}: {error}"
 
-        return f"### Content from {url}:\n\n{cleaned}"
+        extracted = await extract_media_resource(
+            resource,
+            max_chars=max_chars,
+            include_images=context.image_count < context.max_images,
+        )
+        if not extracted.multimodal_content:
+            return extracted.text
+
+        context.image_count += sum(
+            part.get("type") == "image_url" for part in extracted.multimodal_content
+        )
+        return ToolResult(extracted.text, extracted.multimodal_content)

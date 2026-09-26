@@ -3,6 +3,7 @@ from typing import Any
 
 import discord
 
+from bot.discord.attachments import attachment_to_text
 from bot.discord.image import (
     extract_image_urls_from_text_and_embeds,
     format_turn_content,
@@ -100,8 +101,6 @@ async def get_channel_context_messages(
     for msg in valid_messages:
         text = extract_message_text(msg)
         images = msg_image_parts.get(msg.id, [])
-        if not text and not images:
-            continue
 
         if client_id and msg.author.id == client_id:
             if text == "*Thinking...*" or text.startswith("*Thinking"):
@@ -109,6 +108,20 @@ async def get_channel_context_messages(
             raw_turns.append({"role": "assistant", "content": text})
             continue
 
+        for attachment in msg.attachments:
+            if is_image_attachment(attachment):
+                continue
+            attachment_content = await attachment_to_text(
+                attachment,
+                max_size_bytes=max_size_bytes,
+            )
+            text = (
+                f"{text}\n\nExtracted attachment {attachment.filename}:\n"
+                f"{attachment_content}"
+            ).strip()
+
+        if not text and not images:
+            continue
         cleaned = clean_prompt(text, client_user)
         if not cleaned and not images:
             continue

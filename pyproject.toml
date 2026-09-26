@@ -12,6 +12,7 @@ dependencies = [
     "openai>=3.19.2",
     "pydantic",
     "pydantic-settings",
+    "pypdf>=5.0",
     "trafilatura>=2.2.0",
 ]
 
