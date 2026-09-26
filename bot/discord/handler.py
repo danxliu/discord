@@ -58,10 +58,10 @@ async def _deliver_generated_images(
 
 
 def should_respond(message: discord.Message, client_user: discord.ClientUser) -> bool:
-    if message.author.bot:
+    if message.author.id == client_user.id:
         return False
     if isinstance(message.channel, discord.DMChannel):
-        return True
+        return not message.author.bot
     if client_user in message.mentions:
         return True
     if message.reference:
