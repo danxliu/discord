@@ -85,38 +85,6 @@ def split_content(text: str, limit: int = 2000) -> list[str]:
 
 class DiscordMessenger:
     @staticmethod
-    async def safe_react(message: discord.Message, emoji: str) -> None:
-        try:
-            await message.add_reaction(emoji)
-        except (discord.NotFound, discord.Forbidden):
-            logger.debug("Could not add reaction message_id=%s", message.id)
-        except discord.HTTPException:
-            logger.warning(
-                "Discord rejected reaction message_id=%s", message.id, exc_info=True
-            )
-        except Exception:
-            logger.exception("Unexpected reaction failure message_id=%s", message.id)
-
-    @staticmethod
-    async def safe_remove_reaction(
-        message: discord.Message, emoji: str, user: discord.ClientUser
-    ) -> None:
-        try:
-            await message.remove_reaction(emoji, user)
-        except (discord.NotFound, discord.Forbidden):
-            logger.debug("Could not remove reaction message_id=%s", message.id)
-        except discord.HTTPException:
-            logger.warning(
-                "Discord rejected reaction removal message_id=%s",
-                message.id,
-                exc_info=True,
-            )
-        except Exception:
-            logger.exception(
-                "Unexpected reaction removal failure message_id=%s", message.id
-            )
-
-    @staticmethod
     async def safe_edit(message: discord.Message, content: str) -> None:
         if not content or not content.strip():
             content = "*(Empty response)*"

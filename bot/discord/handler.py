@@ -354,12 +354,10 @@ async def handle_message_event(
         len(message.attachments),
         len(current_image_parts),
     )
-    await DiscordMessenger.safe_react(message, "⏳")
     status_msg = await DiscordMessenger.safe_send(
         message.channel, "*Thinking...*", reply_to=message
     )
     if not status_msg:
-        await DiscordMessenger.safe_remove_reaction(message, "⏳", client_user)
         return
 
     streamer = (
@@ -377,8 +375,6 @@ async def handle_message_event(
 
     async def on_error(err: str) -> None:
         await DiscordMessenger.safe_edit(status_msg, f"❌ Error: {err}")
-        await DiscordMessenger.safe_remove_reaction(message, "⏳", client_user)
-        await DiscordMessenger.safe_react(message, "❌")
 
     async def on_fallback_send(chunks: list[str]) -> None:
         await DiscordMessenger.safe_edit(status_msg, chunks[0])
@@ -395,7 +391,7 @@ async def handle_message_event(
 
     status_callback = streamer.set_status if streamer else fallback_status
 
-    success = await _execute_chat_pipeline(
+    await _execute_chat_pipeline(
         user=message.author,
         channel=message.channel,
         guild=message.guild,
@@ -414,6 +410,3 @@ async def handle_message_event(
         on_generated_images=on_generated_images,
     )
 
-    if success:
-        await DiscordMessenger.safe_remove_reaction(message, "⏳", client_user)
-        await DiscordMessenger.safe_react(message, "✅")
