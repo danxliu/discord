@@ -256,10 +256,7 @@ async def _execute_chat_pipeline(
             )
         answer = f"{answer}\n\n{note}".strip()
 
-    if context.generated_images and on_generated_images:
-        if streamer:
-            await streamer.stop(delete_followups=True)
-    elif streamer:
+    if streamer:
         await streamer.finalize(answer)
     elif on_fallback_send:
         await on_fallback_send(split_content(answer))
@@ -392,8 +389,8 @@ async def handle_message_event(
     async def on_generated_images(images: list[GeneratedImage]) -> None:
         await _deliver_generated_images(
             images,
-            lambda files: status_msg.edit(content=None, attachments=files),
-            lambda text: DiscordMessenger.safe_edit(status_msg, text),
+            lambda files: status_msg.edit(attachments=files),
+            lambda text: DiscordMessenger.safe_send(message.channel, text),
             request_id,
         )
 
