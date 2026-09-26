@@ -35,7 +35,6 @@ def build_system_prompt(
         )
 
     now_utc = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-    user_info = f"User: {user.display_name} (@{user.name}, ID: {user.id})"
 
     channel_name = getattr(channel, "name", "direct-message")
     channel_id = getattr(channel, "id", "unknown")
@@ -43,10 +42,17 @@ def build_system_prompt(
 
     channel_info = f"Channel: #{channel_name} (ID: {channel_id})"
     if channel_topic:
-        channel_info += f"\nChannel Topic: {channel_topic}"
+        channel_info += f"\n- Channel Topic: {channel_topic}"
 
     if guild:
-        guild_info = f"Server: {guild.name} (ID: {guild.id})"
+        environment_info = (
+            f"Environment: Discord Server / Guild '{guild.name}' (ID: {guild.id})"
+        )
+        speaker_info = (
+            f"Current Speaker (invoking user): {user.display_name} (@{user.name}, ID: {user.id})\n"
+            f"- Multi-User Channel: Multiple people participate in this channel. Messages from users are prefixed with `[DisplayName (@username)]:`. "
+            f"Address and respond directly to the Current Speaker ({user.display_name}) unless they ask about someone else."
+        )
         emojis = [
             f"<{'a' if e.animated else ''}:{e.name}:{e.id}>" for e in guild.emojis[:30]
         ]
@@ -56,15 +62,16 @@ def build_system_prompt(
             else "No custom server emojis."
         )
     else:
-        guild_info = "Server: Direct Message"
+        environment_info = "Environment: Direct Message (1-on-1 private chat)"
+        speaker_info = f"User: {user.display_name} (@{user.name}, ID: {user.id})"
         emoji_section = "No custom server emojis (DM)."
 
     context_section = (
         f"## Current Context\n"
         f"- Date/Time: {now_utc}\n"
-        f"- {guild_info}\n"
+        f"- {environment_info}\n"
         f"- {channel_info}\n"
-        f"- {user_info}\n"
+        f"- {speaker_info}\n"
         f"- {emoji_section}"
     )
 

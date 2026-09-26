@@ -1,4 +1,3 @@
-from datetime import datetime
 from typing import Any
 
 import discord
@@ -50,7 +49,6 @@ async def get_channel_context_messages(
     client_user: discord.ClientUser | None,
     limit: int = 10,
     before: discord.Message | None = None,
-    after_timestamp: datetime | None = None,
     exclude_message_id: int | None = None,
     max_images: int = 0,
     max_size_bytes: int = 20 * 1024 * 1024,
@@ -75,7 +73,6 @@ async def get_channel_context_messages(
         msg
         for msg in raw_messages
         if not (exclude_message_id and msg.id == exclude_message_id)
-        and not (after_timestamp and msg.created_at <= after_timestamp)
     ]
 
     msg_image_parts: dict[int, list[dict[str, Any]]] = {}
@@ -125,11 +122,32 @@ async def get_channel_context_messages(
         cleaned = clean_prompt(text, client_user)
         if not cleaned and not images:
             continue
-        user_text = (
-            f"{msg.author.display_name}: {cleaned}"
-            if cleaned
-            else f"{msg.author.display_name}"
-        )
+
+        # Include reply context in history if this message was a reply
+        reply_prefix = ""
+        if msg.reference:
+            ref_msg = (
+                msg.reference.resolved
+                if isinstance(msg.reference.resolved, discord.Message)
+                else msg.reference.cached_message
+            )
+            if isinstance(ref_msg, discord.Message):
+                ref_speaker = (
+                    "Assistant"
+                    if client_id and ref_msg.author.id == client_id
+                    else f"{ref_msg.author.display_name} (@{ref_msg.author.name})"
+                )
+                ref_snippet = clean_prompt(extract_message_text(ref_msg), client_user)
+                if len(ref_snippet) > 150:
+                    ref_snippet = ref_snippet[:147] + "..."
+                if ref_snippet:
+                    reply_prefix = f'(Replying to {ref_speaker}: "{ref_snippet}")\n'
+
+        if reply_prefix:
+            cleaned = f"{reply_prefix}{cleaned}".strip()
+
+        author_label = f"[{msg.author.display_name} (@{msg.author.name})]"
+        user_text = f"{author_label}: {cleaned}" if cleaned else author_label
         turn_content = format_turn_content(user_text, images)
         raw_turns.append({"role": "user", "content": turn_content})
 

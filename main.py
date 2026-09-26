@@ -8,7 +8,7 @@ from discord import app_commands
 import pelican
 from bot.agent import AgenticLoop
 from bot.discord import handle_chat_command, handle_message_event
-from bot.memory import ChannelHistory, UserMemory
+from bot.memory import UserMemory
 from bot.tools import (
     MemoryReadTool,
     MemorySaveTool,
@@ -71,13 +71,12 @@ class Client(discord.Client):
         logger.info("Logged in as %s (ID: %s)", self.user, self.user.id)
 
     async def on_message(self, message: discord.Message):
-        await handle_message_event(message, self.user, agent_loop, channel_history)
+        await handle_message_event(message, self.user, agent_loop)
 
 
 client = Client()
 
 user_memory = UserMemory()
-channel_history = ChannelHistory(max_turns=settings.ai_max_history_turns)
 
 tool_registry = ToolRegistry()
 tool_registry.register(WebSearchTool())
@@ -290,20 +289,7 @@ async def chat(
     prompt: str,
     image: discord.Attachment | None = None,
 ):
-    await handle_chat_command(
-        interaction, prompt, agent_loop, channel_history, image=image
-    )
-
-
-@client.tree.command(
-    name="clear", description="Clear AI conversation history for this channel"
-)
-async def clear(interaction: discord.Interaction):
-    channel_id = interaction.channel_id or interaction.user.id
-    channel_history.clear(channel_id)
-    await interaction.response.send_message(
-        "Conversation history cleared for this channel.", ephemeral=True
-    )
+    await handle_chat_command(interaction, prompt, agent_loop, image=image)
 
 
 def main():

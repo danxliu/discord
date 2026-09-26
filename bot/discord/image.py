@@ -251,7 +251,7 @@ def merge_turn_contents(
 ) -> str | list[dict[str, Any]]:
     """Merge two turn contents cleanly, preserving both text and images."""
     if isinstance(c1, str) and isinstance(c2, str):
-        return f"{c1}\n{c2}"
+        return f"{c1}\n\n{c2}"
 
     t1 = (
         c1
@@ -271,7 +271,7 @@ def merge_turn_contents(
         [] if isinstance(c2, str) else [p for p in c2 if p.get("type") == "image_url"]
     )
 
-    combined_text = f"{t1}\n{t2}".strip() if t1 and t2 else (t1 or t2)
+    combined_text = f"{t1}\n\n{t2}".strip() if t1 and t2 else (t1 or t2)
     combined_images = imgs1 + imgs2
 
     return format_turn_content(combined_text, combined_images)

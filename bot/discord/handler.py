@@ -21,12 +21,10 @@ from bot.discord.image import (
     is_vision_unsupported_error,
     load_images_from_message,
     merge_turn_contents,
-    to_text_summary,
     url_to_image_part,
 )
 from bot.discord.messenger import DiscordMessenger, split_content
 from bot.discord.streamer import MessageStreamer
-from bot.memory.channel import ChannelHistory
 from bot.memory.prompt import build_system_prompt
 from bot.tools.base import ToolContext
 from config import settings
@@ -86,7 +84,6 @@ async def _execute_chat_pipeline(
     request_id: str,
     streamer: MessageStreamer | None,
     agent_loop: AgenticLoop,
-    channel_history: ChannelHistory,
     on_status: Callable[[str], Awaitable[None]],
     on_error: Callable[[str], Awaitable[None]],
     on_fallback_send: Callable[[list[str]], Awaitable[None]] | None = None,
@@ -114,16 +111,13 @@ async def _execute_chat_pipeline(
             client_user=client_user,
             limit=settings.ai_channel_history_limit,
             before=before_message,
-            after_timestamp=channel_history.get_cleared_at(channel_id),
             exclude_message_id=exclude_message_id,
             max_images=history_image_budget,
             max_size_bytes=max_size_bytes,
         )
 
-    if not history_turns:
-        history_turns = channel_history.get_history(channel_id)
-
-    current_user_text = f"{user.display_name}: {prompt}"
+    current_author_label = f"[{user.display_name} (@{user.name})]"
+    current_user_text = f"{current_author_label}: {prompt}"
     current_turn_content = format_turn_content(current_user_text, image_parts)
 
     all_turns = list(history_turns)
@@ -211,8 +205,6 @@ async def _execute_chat_pipeline(
         streamer is not None,
     )
 
-    channel_history.add_turn(channel_id, "user", to_text_summary(current_turn_content))
-    channel_history.add_turn(channel_id, "assistant", answer)
     return True
 
 
@@ -220,7 +212,6 @@ async def handle_message_event(
     message: discord.Message,
     client_user: discord.ClientUser,
     agent_loop: AgenticLoop,
-    channel_history: ChannelHistory,
 ) -> None:
     if not should_respond(message, client_user):
         return
@@ -266,8 +257,8 @@ async def handle_message_event(
             ref_text = ref_text[:297] + "..."
         speaker = (
             "Assistant"
-            if ref_message.author.id == client_user.id
-            else ref_message.author.display_name
+            if client_user and ref_message.author.id == client_user.id
+            else f"{ref_message.author.display_name} (@{ref_message.author.name})"
         )
         prompt = f'(Replying to {speaker}: "{ref_text}")\n{prompt}'.strip()
     seen_urls: set[str] = set()
@@ -350,7 +341,6 @@ async def handle_message_event(
         request_id=request_id,
         streamer=streamer,
         agent_loop=agent_loop,
-        channel_history=channel_history,
         on_status=status_callback,
         on_error=on_error,
         on_fallback_send=on_fallback_send,
@@ -368,7 +358,6 @@ async def handle_chat_command(
     interaction: discord.Interaction,
     prompt: str,
     agent_loop: AgenticLoop,
-    channel_history: ChannelHistory,
     image: discord.Attachment | None = None,
 ) -> None:
     request_id = uuid4().hex[:12]
@@ -474,7 +463,6 @@ async def handle_chat_command(
         request_id=request_id,
         streamer=streamer,
         agent_loop=agent_loop,
-        channel_history=channel_history,
         on_status=status_callback,
         on_error=on_error,
         on_fallback_send=on_fallback_send,
