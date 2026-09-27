@@ -5,6 +5,24 @@ import discord
 
 from bot.tools.base import ToolRegistry
 
+_prompt_cache: dict[str, tuple[int, int, str]] = {}
+
+
+def _get_base_prompt(prompt_path: str) -> str:
+    path = Path(prompt_path)
+    if not path.is_file():
+        return "You are an intelligent, helpful AI assistant operating inside Discord."
+    try:
+        stat = path.stat()
+        cached = _prompt_cache.get(prompt_path)
+        if cached is not None and cached[:2] == (stat.st_mtime_ns, stat.st_size):
+            return cached[2]
+        content = path.read_text(encoding="utf-8").strip()
+        _prompt_cache[prompt_path] = (stat.st_mtime_ns, stat.st_size, content)
+        return content
+    except Exception:
+        return "You are an intelligent, helpful AI assistant operating inside Discord."
+
 
 def build_system_prompt(
     prompt_path: str,
@@ -13,12 +31,7 @@ def build_system_prompt(
     guild: discord.Guild | None = None,
     tool_registry: ToolRegistry | None = None,
 ) -> str:
-    path = Path(prompt_path)
-    base_prompt = (
-        path.read_text(encoding="utf-8").strip()
-        if path.is_file()
-        else "You are an intelligent, helpful AI assistant operating inside Discord."
-    )
+    base_prompt = _get_base_prompt(prompt_path)
 
     tools = tool_registry.get_tools() if tool_registry is not None else []
     tool_lines = [f"- `{tool.name}`: {tool.description}" for tool in tools]

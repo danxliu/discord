@@ -20,6 +20,12 @@ dependencies = [
 [dependency-groups]
 dev = ["ruff>=0.16.5"]
 
+[tool.setuptools]
+py-modules = ["config", "main", "pelican"]
+
+[tool.setuptools.packages.find]
+include = ["bot*"]
+
 [tool.ruff]
 line-length = 88
 target-version = "py312"

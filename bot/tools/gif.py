@@ -5,7 +5,7 @@ from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 
-from bot.net import is_public_url, public_connector
+from bot.net import get_public_session, is_public_url
 from bot.tools.base import BaseTool, GeneratedImage, ToolContext, ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -48,9 +48,7 @@ class GifSendTool(BaseTool):
             "additionalProperties": False,
         }
 
-    async def execute(
-        self, context: ToolContext, query: str, **kwargs: Any
-    ) -> str:
+    async def execute(self, context: ToolContext, query: str, **kwargs: Any) -> str:
         query = query.strip() if isinstance(query, str) else ""
         if not query:
             return "Error: A GIF search query is required."
@@ -59,32 +57,32 @@ class GifSendTool(BaseTool):
 
         timeout = aiohttp.ClientTimeout(total=15)
         try:
-            async with aiohttp.ClientSession(
-                connector=public_connector(), timeout=timeout
-            ) as session:
-                async with session.get(
-                    GIPHY_SEARCH_URL,
-                    params={
-                        "api_key": self.api_key,
-                        "q": query,
-                        "limit": 1,
-                        "rating": GIPHY_RATING,
-                    },
-                ) as response:
-                    if response.status != 200:
-                        logger.warning(
-                            "GIPHY search failed request_id=%s status=%d",
-                            context.request_id,
-                            response.status,
-                        )
-                        return "Error: GIPHY could not search for a GIF right now."
-                    payload = await response.json()
+            session = await get_public_session()
+            async with session.get(
+                GIPHY_SEARCH_URL,
+                params={
+                    "api_key": self.api_key,
+                    "q": query,
+                    "limit": 1,
+                    "rating": GIPHY_RATING,
+                },
+                timeout=timeout,
+            ) as response:
+                if response.status != 200:
+                    logger.warning(
+                        "GIPHY search failed request_id=%s status=%d",
+                        context.request_id,
+                        response.status,
+                    )
+                    return "Error: GIPHY could not search for a GIF right now."
+                payload = await response.json()
 
-                gif_url = self._first_gif_url(payload)
-                if not gif_url:
-                    return f'No GIPHY results found for "{query}".'
+            gif_url = self._first_gif_url(payload)
+            if not gif_url:
+                return f'No GIPHY results found for "{query}".'
 
-                gif_data = await self._download_gif(session, gif_url)
+            gif_data = await self._download_gif(session, gif_url)
+
         except (aiohttp.ClientError, TimeoutError, ValueError) as error:
             logger.warning(
                 "GIPHY request failed request_id=%s error=%s",

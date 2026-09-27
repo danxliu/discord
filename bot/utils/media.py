@@ -4,7 +4,6 @@ import asyncio
 import base64
 import logging
 import mimetypes
-import ssl
 from dataclasses import dataclass
 from email.message import Message
 from io import BytesIO
@@ -12,12 +11,11 @@ from typing import Any
 from urllib.parse import urljoin
 
 import aiohttp
-import certifi
 import trafilatura
 from PIL import Image, ImageOps
 from pypdf import PdfReader
 
-from bot.net import is_public_url, public_connector
+from bot.net import get_public_session, is_public_url
 from bot.utils.video import (
     MAX_MEDIA_BYTES,
     MediaProcessingError,
@@ -62,67 +60,70 @@ class WebFetchError(Exception):
 async def fetch_web_resource(
     url: str,
     *,
+    session: aiohttp.ClientSession | None = None,
     timeout_seconds: float = 15,
     max_bytes: int = MAX_MEDIA_BYTES,
 ) -> MediaResource:
     if not is_public_url(url):
         raise WebFetchError("Refusing to fetch a non-public URL.")
 
-    ssl_context = ssl.create_default_context(cafile=certifi.where())
     timeout = aiohttp.ClientTimeout(total=timeout_seconds)
     current_url = url
 
-    async with aiohttp.ClientSession(
-        headers=FETCH_HEADERS,
-        connector=public_connector(ssl_context),
-        timeout=timeout,
-    ) as session:
-        for redirect_count in range(6):
-            if not is_public_url(current_url):
-                raise WebFetchError("Refusing to fetch a non-public redirect URL.")
+    client_session = session or await get_public_session()
+    for redirect_count in range(6):
+        if not is_public_url(current_url):
+            raise WebFetchError("Refusing to fetch a non-public redirect URL.")
 
-            async with session.get(current_url, allow_redirects=False) as response:
-                if response.status in REDIRECT_STATUSES:
-                    location = response.headers.get("Location")
-                    if not location:
-                        raise WebFetchError("Redirect has no target.")
-                    if redirect_count == 5:
-                        raise WebFetchError("Too many redirects.")
-                    current_url = urljoin(current_url, location)
-                    continue
-                if response.status != 200:
-                    raise WebFetchError(f"HTTP {response.status}")
+        async with client_session.get(
+            current_url,
+            headers=FETCH_HEADERS,
+            allow_redirects=False,
+            timeout=timeout,
+        ) as response:
+            if response.status in REDIRECT_STATUSES:
+                location = response.headers.get("Location")
+                if not location:
+                    raise WebFetchError("Redirect has no target.")
+                if redirect_count == 5:
+                    raise WebFetchError("Too many redirects.")
+                current_url = urljoin(current_url, location)
+                continue
+            if response.status != 200:
+                raise WebFetchError(f"HTTP {response.status}")
 
-                data = bytearray()
-                async for chunk in response.content.iter_chunked(64 * 1024):
-                    data.extend(chunk)
-                    if len(data) > max_bytes:
-                        raise WebFetchError(
-                            f"The response exceeds the {max_bytes // (1024 * 1024)} MB limit."
-                        )
+            data = bytearray()
+            async for chunk in response.content.iter_chunked(64 * 1024):
+                data.extend(chunk)
+                if len(data) > max_bytes:
+                    raise WebFetchError(
+                        f"The response exceeds the {max_bytes // (1024 * 1024)} MB limit."
+                    )
 
-                if not data:
-                    raise WebFetchError("The URL returned an empty response.")
+            if not data:
+                raise WebFetchError("The URL returned an empty response.")
 
-                raw_content_type = response.headers.get("Content-Type", "")
-                content_header = Message()
-                if raw_content_type:
-                    content_header["content-type"] = raw_content_type
-                return MediaResource(
-                    source=current_url,
-                    content_type=(
-                        content_header.get_content_type().lower()
-                        if raw_content_type
-                        else "application/octet-stream"
-                    ),
-                    charset=content_header.get_content_charset(),
-                    data=bytes(data),
-                )
+            raw_content_type = response.headers.get("Content-Type", "")
+            content_header = Message()
+            if raw_content_type:
+                content_header["content-type"] = raw_content_type
+            return MediaResource(
+                source=current_url,
+                content_type=(
+                    content_header.get_content_type().lower()
+                    if raw_content_type
+                    else "application/octet-stream"
+                ),
+                charset=content_header.get_content_charset(),
+                data=bytes(data),
+            )
 
     raise WebFetchError("Too many redirects.")
 
 
-def detect_image_mime(data: bytes, default: str = "") -> str:
+def detect_image_mime(
+    data: bytes, default: str = "", *, filename_or_url: str = ""
+) -> str:
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
     if data.startswith(b"\xff\xd8\xff"):
@@ -133,6 +134,11 @@ def detect_image_mime(data: bytes, default: str = "") -> str:
         return "image/gif"
     if data.startswith(b"BM"):
         return "image/bmp"
+
+    if filename_or_url:
+        guessed, _ = mimetypes.guess_type(filename_or_url)
+        if guessed and guessed.startswith("image/"):
+            return guessed
     return default
 
 
@@ -194,7 +200,9 @@ def prepare_image_for_model(
         return None
 
 
-def image_data_part(data: bytes | bytearray, mime_type: str = "image/jpeg") -> dict[str, Any]:
+def image_data_part(
+    data: bytes | bytearray, mime_type: str = "image/jpeg"
+) -> dict[str, Any]:
     prepared = prepare_image_for_model(data)
     if prepared is not None:
         data_bytes, final_mime = prepared
@@ -221,7 +229,11 @@ def _media_type(resource: MediaResource) -> str:
         return "video/mp4"
     if resource.data.startswith(b"\x1aE\xdf\xa3"):
         return "video/webm"
-    if len(resource.data) >= 12 and resource.data[:4] == b"RIFF" and resource.data[8:12] == b"AVI ":
+    if (
+        len(resource.data) >= 12
+        and resource.data[:4] == b"RIFF"
+        and resource.data[8:12] == b"AVI "
+    ):
         return "video/x-msvideo"
     if content_type and content_type != "application/octet-stream":
         return content_type

@@ -53,7 +53,7 @@ def _normalize_generated_image(
         return None
 
     normalized, normalized_mime = prepared
-    detected_mime = detect_image_mime(normalized, normalized_mime or mime_type)
+    detected_mime = detect_image_mime(normalized, default=normalized_mime or mime_type)
     extension = FILE_EXTENSIONS.get(detected_mime)
     if not extension:
         return None

@@ -1,18 +1,16 @@
-"""Image extraction, validation, and encoding utilities for multimodal AI interactions."""
-
 import logging
-import mimetypes
 import re
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
-import aiohttp
 import discord
 
-from bot.net import is_public_url, public_connector
+from bot.utils import media as _media
+from bot.utils import video as _video
 from bot.utils.media import (
+    ExtractedContent,
     MediaResource,
     extract_media_resource,
     fetch_web_resource,
@@ -20,18 +18,22 @@ from bot.utils.media import (
 )
 from bot.utils.video import MAX_MEDIA_BYTES, is_animated_gif, is_video_media
 
+is_video_unsupported_error = _video.is_video_unsupported_error
+replace_video_parts_with_fallbacks = _video.replace_video_parts_with_fallbacks
+
 logger = logging.getLogger(__name__)
 
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 URL_REGEX = re.compile(r"https?://[^\s<>\"'()]+")
-IMAGE_FETCH_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-    ),
-    "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
-}
+
+
+def detect_image_mime(
+    data: bytes, filename_or_url: str = "", default: str = "image/jpeg"
+) -> str:
+    return _media.detect_image_mime(
+        data, default=default, filename_or_url=filename_or_url
+    )
 
 
 def is_image_attachment(attachment: discord.Attachment) -> bool:
@@ -47,10 +49,13 @@ def is_image_attachment(attachment: discord.Attachment) -> bool:
 
 
 def is_video_attachment(attachment: discord.Attachment) -> bool:
-    return is_video_media(
-        getattr(attachment, "content_type", None) or "",
-        getattr(attachment, "filename", ""),
-    ) or Path(getattr(attachment, "filename", "")).suffix.lower() == ".gif"
+    return (
+        is_video_media(
+            getattr(attachment, "content_type", None) or "",
+            getattr(attachment, "filename", ""),
+        )
+        or Path(getattr(attachment, "filename", "")).suffix.lower() == ".gif"
+    )
 
 
 def is_image_url(url: str) -> bool:
@@ -61,31 +66,6 @@ def is_image_url(url: str) -> bool:
         return any(path.endswith(ext) for ext in IMAGE_EXTENSIONS)
     except ValueError:
         return False
-
-
-def detect_image_mime(
-    data: bytes, filename_or_url: str = "", default: str = "image/jpeg"
-) -> str:
-    """Detect image MIME type from magic bytes with fallback to filename extension."""
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if data.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp"
-    if data.startswith((b"GIF87a", b"GIF89a")):
-        return "image/gif"
-    if data.startswith(b"BM"):
-        return "image/bmp"
-
-    guessed, _ = mimetypes.guess_type(filename_or_url)
-    if guessed and guessed.startswith("image/"):
-        return guessed
-    return default
-
-
-def _image_part(data: bytes | bytearray, mime: str) -> dict[str, Any]:
-    return image_data_part(data, mime)
 
 
 async def attachment_to_image_part(
@@ -103,9 +83,11 @@ async def attachment_to_image_part(
             else None
         )
         if not mime or not mime.startswith("image/"):
-            mime = detect_image_mime(data, attachment.filename)
+            mime = detect_image_mime(
+                data, default="image/jpeg", filename_or_url=attachment.filename
+            )
 
-        return _image_part(data, mime)
+        return image_data_part(data, mime)
     except Exception as e:
         logger.warning("Failed to download attachment %s: %s", attachment.filename, e)
         return None
@@ -115,53 +97,18 @@ async def url_to_image_part(
     url: str,
 ) -> dict[str, Any] | None:
     """Download a public image URL and convert it to an image content part."""
-    session = None
     try:
-        timeout = aiohttp.ClientTimeout(total=10)
-        connector = public_connector()
-        session = aiohttp.ClientSession(
-            headers=IMAGE_FETCH_HEADERS, connector=connector, timeout=timeout
+        resource = await fetch_web_resource(
+            url, timeout_seconds=10, max_bytes=MAX_MEDIA_BYTES
         )
-        for _ in range(6):
-            if not is_public_url(url):
-                logger.warning("Refusing to fetch a non-public image URL")
-                return None
-            async with session.get(url, allow_redirects=False) as resp:
-                if resp.status in {301, 302, 303, 307, 308}:
-                    location = resp.headers.get("Location")
-                    if not location:
-                        return None
-                    url = urljoin(url, location)
-                    continue
-                if resp.status != 200:
-                    logger.warning(
-                        "Image URL fetch returned HTTP %d for %s", resp.status, url
-                    )
-                    return None
-
-                data = bytearray()
-                async for chunk in resp.content.iter_chunked(64 * 1024):
-                    data.extend(chunk)
-                    if len(data) > MAX_MEDIA_BYTES:
-                        logger.warning("Image URL exceeded the media size limit: %s", url)
-                        return None
-
-                if not data:
-                    return None
-
-                mime = detect_image_mime(data, default="")
-                if not mime:
-                    logger.warning("URL %s did not return a supported image", url)
-                    return None
-
-                return _image_part(data, mime)
-        return None
+        mime = detect_image_mime(resource.data, filename_or_url=url, default="")
+        if not mime or not mime.startswith("image/"):
+            logger.warning("URL %s did not return a supported image", url)
+            return None
+        return image_data_part(resource.data, mime)
     except Exception as e:
-        logger.warning("Failed to download image URL: %s", e)
+        logger.warning("Failed to download image URL %s: %s", url, e)
         return None
-    finally:
-        if session:
-            await session.close()
 
 
 def extract_image_urls_from_text_and_embeds(
@@ -198,12 +145,26 @@ def extract_video_urls_from_text_and_embeds(
     seen_urls: set[str] | None = None,
 ) -> list[str]:
     seen = seen_urls if seen_urls is not None else set()
-    embed_urls = {getattr(embed.video, "url", None) for embed in embeds}
-    embed_urls.discard(None)
+    embed_urls = [
+        url
+        for embed in embeds
+        if (url := getattr(embed.video, "url", None)) is not None
+    ]
+    embed_url_set = set(embed_urls)
     candidates = list(embed_urls)
     candidates.extend(URL_REGEX.findall(content or ""))
     found: list[str] = []
-    extensions = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".mpeg", ".mpg", ".gif"}
+    extensions = {
+        ".mp4",
+        ".mov",
+        ".m4v",
+        ".webm",
+        ".mkv",
+        ".avi",
+        ".mpeg",
+        ".mpg",
+        ".gif",
+    }
     for candidate in candidates:
         if not candidate:
             continue
@@ -212,10 +173,21 @@ def extract_video_urls_from_text_and_embeds(
             suffix = Path(urlparse(url).path).suffix.lower()
         except ValueError:
             continue
-        if (suffix in extensions or url in embed_urls) and url not in seen:
+        if (suffix in extensions or url in embed_url_set) and url not in seen:
             seen.add(url)
             found.append(url)
     return found
+
+
+def _media_result_parts(
+    extracted: ExtractedContent,
+) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+    parts = list(extracted.multimodal_content or [])
+    if not extracted.multimodal_content and extracted.text.startswith(
+        "Could not process"
+    ):
+        parts.append({"type": "text", "text": extracted.text})
+    return parts, extracted.video_fallbacks or {}
 
 
 async def load_media_from_message(
@@ -227,30 +199,51 @@ async def load_media_from_message(
     parts: list[dict[str, Any]] = []
     fallbacks: dict[str, list[dict[str, Any]]] = {}
 
-    def add_note(text: str) -> None:
-        parts.append({"type": "text", "text": text})
+    target_attachments = [
+        att
+        for att in msg.attachments
+        if att.url not in seen
+        and (is_image_attachment(att) or is_video_attachment(att))
+    ]
+    for att in target_attachments:
+        seen.add(att.url)
 
-    for attachment in msg.attachments:
-        if attachment.url in seen or not (
-            is_image_attachment(attachment) or is_video_attachment(attachment)
-        ):
-            continue
-        seen.add(attachment.url)
+    async def _process_attachment(
+        attachment: discord.Attachment,
+    ) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+        local_parts: list[dict[str, Any]] = []
+        local_fallbacks: dict[str, list[dict[str, Any]]] = {}
         try:
             if getattr(attachment, "size", 0) > MAX_MEDIA_BYTES:
-                logger.warning("Skipping oversized Discord media filename=%s", attachment.filename)
+                logger.warning(
+                    "Skipping oversized Discord media filename=%s", attachment.filename
+                )
                 if is_video_attachment(attachment):
-                    add_note(
-                        f"Video {attachment.filename} was not attached because it exceeds the 25 MB limit."
+                    local_parts.append(
+                        {
+                            "type": "text",
+                            "text": (
+                                f"Video {attachment.filename} was not attached because it "
+                                "exceeds the 25 MB limit."
+                            ),
+                        }
                     )
-                continue
+                return local_parts, local_fallbacks
+
             data = await attachment.read()
             if not data or len(data) > MAX_MEDIA_BYTES:
                 if is_video_attachment(attachment):
-                    add_note(
-                        f"Video {attachment.filename} was not attached because it is empty or exceeds the 25 MB limit."
+                    local_parts.append(
+                        {
+                            "type": "text",
+                            "text": (
+                                f"Video {attachment.filename} was not attached because it "
+                                "is empty or exceeds the 25 MB limit."
+                            ),
+                        }
                     )
-                continue
+                return local_parts, local_fallbacks
+
             if is_video_attachment(attachment) or is_animated_gif(data):
                 extracted = await extract_media_resource(
                     MediaResource(
@@ -260,34 +253,67 @@ async def load_media_from_message(
                         data,
                     )
                 )
-                parts.extend(extracted.multimodal_content or [])
-                if not extracted.multimodal_content and extracted.text.startswith("Could not process"):
-                    add_note(extracted.text)
-                fallbacks.update(extracted.video_fallbacks or {})
+                extracted_parts, extracted_fallbacks = _media_result_parts(extracted)
+                local_parts.extend(extracted_parts)
+                local_fallbacks.update(extracted_fallbacks)
             else:
-                parts.append(_image_part(data, detect_image_mime(data, attachment.filename)))
+                local_parts.append(
+                    image_data_part(
+                        data,
+                        detect_image_mime(data, filename_or_url=attachment.filename),
+                    )
+                )
         except Exception:
-            logger.exception("Failed to load Discord media filename=%s", attachment.filename)
+            logger.exception(
+                "Failed to load Discord media filename=%s", attachment.filename
+            )
             if is_video_attachment(attachment):
-                add_note(f"Video {attachment.filename} could not be processed.")
+                local_parts.append(
+                    {
+                        "type": "text",
+                        "text": f"Video {attachment.filename} could not be processed.",
+                    }
+                )
+        return local_parts, local_fallbacks
 
     video_urls = extract_video_urls_from_text_and_embeds(msg.content, msg.embeds, seen)
     image_urls = extract_image_urls_from_text_and_embeds(msg.content, msg.embeds, seen)
-    for url in image_urls:
-        part = await url_to_image_part(url)
-        if part:
-            parts.append(part)
-    for url in video_urls:
+
+    async def _process_video_url(
+        url: str,
+    ) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+        local_parts: list[dict[str, Any]] = []
+        local_fallbacks: dict[str, list[dict[str, Any]]] = {}
         try:
             resource = await fetch_web_resource(url, max_bytes=MAX_MEDIA_BYTES)
             extracted = await extract_media_resource(resource)
-            parts.extend(extracted.multimodal_content or [])
-            if not extracted.multimodal_content and extracted.text.startswith("Could not process"):
-                add_note(extracted.text)
-            fallbacks.update(extracted.video_fallbacks or {})
+            extracted_parts, extracted_fallbacks = _media_result_parts(extracted)
+            local_parts.extend(extracted_parts)
+            local_fallbacks.update(extracted_fallbacks)
         except Exception as error:
             logger.warning("Failed to load linked video URL=%s error=%s", url, error)
-            add_note(f"Linked video {url} could not be loaded: {error}")
+            local_parts.append(
+                {
+                    "type": "text",
+                    "text": f"Linked video {url} could not be loaded: {error}",
+                }
+            )
+        return local_parts, local_fallbacks
+
+    for attachment in target_attachments:
+        attachment_parts, attachment_fallbacks = await _process_attachment(attachment)
+        parts.extend(attachment_parts)
+        fallbacks.update(attachment_fallbacks)
+
+    for url in image_urls:
+        if part := await url_to_image_part(url):
+            parts.append(part)
+
+    for url in video_urls:
+        video_parts, video_fallbacks = await _process_video_url(url)
+        parts.extend(video_parts)
+        fallbacks.update(video_fallbacks)
+
     return parts, fallbacks
 
 
@@ -381,45 +407,6 @@ def is_vision_unsupported_error(err: str) -> bool:
     return is_schema_mismatch or any(
         message in err_lower for message in unsupported_messages
     )
-
-
-def is_video_unsupported_error(err: str) -> bool:
-    err_lower = err.lower()
-    return "video_url" in err_lower or any(
-        phrase in err_lower
-        for phrase in (
-            "video input is not supported",
-            "does not support video",
-            "doesn't support video",
-            "video is not supported",
-            "unsupported video input",
-        )
-    )
-
-
-def replace_video_parts_with_fallbacks(
-    messages: list[dict[str, Any]],
-    fallbacks: dict[str, list[dict[str, Any]]],
-) -> bool:
-    replaced = False
-    for message in messages:
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        new_content: list[dict[str, Any]] = []
-        for part in content:
-            if part.get("type") != "video_url":
-                new_content.append(part)
-                continue
-            url = part.get("video_url", {}).get("url")
-            frames = fallbacks.get(url) if isinstance(url, str) else None
-            if not frames:
-                new_content.append(part)
-                continue
-            new_content.extend(frames)
-            replaced = True
-        message["content"] = new_content
-    return replaced
 
 
 def convert_messages_to_text_only(

@@ -4,6 +4,7 @@ import ssl
 from urllib.parse import urlparse
 
 import aiohttp
+import certifi
 
 
 class PublicResolver(aiohttp.abc.AbstractResolver):
@@ -45,3 +46,26 @@ def public_connector(ssl_context: ssl.SSLContext | None = None) -> aiohttp.TCPCo
     return aiohttp.TCPConnector(
         resolver=PublicResolver(), ssl=ssl_context if ssl_context is not None else True
     )
+
+
+_public_session: aiohttp.ClientSession | None = None
+
+
+async def get_public_session() -> aiohttp.ClientSession:
+    """Return a shared aiohttp.ClientSession configured with SSRF protection."""
+    global _public_session
+    if _public_session is None or _public_session.closed:
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        connector = public_connector(ssl_context=ssl_context)
+        _public_session = aiohttp.ClientSession(
+            connector=connector, timeout=aiohttp.ClientTimeout(total=20)
+        )
+    return _public_session
+
+
+async def close_public_session() -> None:
+    """Close the shared public HTTP session if open."""
+    global _public_session
+    session, _public_session = _public_session, None
+    if session is not None and not session.closed:
+        await session.close()

@@ -21,6 +21,28 @@ class UserMemory:
             return "category must be a non-blank single line"
         return note, section
 
+    @staticmethod
+    def _section_bounds(lines: list[str], header: str) -> tuple[int, int] | None:
+        start = next(
+            (
+                index
+                for index, line in enumerate(lines)
+                if line.rstrip("\r\n") == header
+            ),
+            None,
+        )
+        if start is None:
+            return None
+        end = next(
+            (
+                index
+                for index in range(start + 1, len(lines))
+                if lines[index].startswith("## ")
+            ),
+            len(lines),
+        )
+        return start, end
+
     def read_memory(self, user_id: int) -> str:
         path = self._file_path(user_id)
         if not path.is_file():
@@ -55,23 +77,9 @@ class UserMemory:
                 return f"Saved new memory: '{note}' under '{section}'."
 
             lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-            section_start = next(
-                (
-                    i
-                    for i, line in enumerate(lines)
-                    if line.rstrip("\r\n") == category_header
-                ),
-                None,
-            )
-            if section_start is not None:
-                section_end = next(
-                    (
-                        i
-                        for i in range(section_start + 1, len(lines))
-                        if lines[i].startswith("## ")
-                    ),
-                    len(lines),
-                )
+            section_bounds = self._section_bounds(lines, category_header)
+            if section_bounds is not None:
+                section_start, section_end = section_bounds
                 if any(
                     line.strip() == fact_line
                     for line in lines[section_start + 1 : section_end]
@@ -112,24 +120,10 @@ class UserMemory:
         fact_line = f"- {note}"
         try:
             lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-            section_start = next(
-                (
-                    i
-                    for i, line in enumerate(lines)
-                    if line.rstrip("\r\n") == category_header
-                ),
-                None,
-            )
-            if section_start is None:
+            section_bounds = self._section_bounds(lines, category_header)
+            if section_bounds is None:
                 return f"No matching memory found under '{section}'."
-            section_end = next(
-                (
-                    i
-                    for i in range(section_start + 1, len(lines))
-                    if lines[i].startswith("## ")
-                ),
-                len(lines),
-            )
+            section_start, section_end = section_bounds
             matches = [
                 i
                 for i in range(section_start + 1, section_end)

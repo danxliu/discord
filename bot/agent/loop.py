@@ -1,35 +1,19 @@
 import json
 import logging
-import re
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from openai import AsyncOpenAI
 
-from bot.agent.sanitizer import StreamingSanitizer
-from bot.discord.image import (
+from bot.agent.sanitizer import StreamingSanitizer, sanitize_thinking_tags
+from bot.tools.base import ToolContext, ToolRegistry, ToolResult
+from bot.utils.video import (
     is_video_unsupported_error,
     replace_video_parts_with_fallbacks,
 )
-from bot.tools.base import ToolContext, ToolRegistry, ToolResult
 
 logger = logging.getLogger(__name__)
-
-THINK_PATTERNS = [
-    re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE),
-    re.compile(r"<thought>.*?</thought>", re.DOTALL | re.IGNORECASE),
-    re.compile(r"<reasoning>.*?</reasoning>", re.DOTALL | re.IGNORECASE),
-    re.compile(r"<\|thought\|>.*?<\|/?thought\|>", re.DOTALL | re.IGNORECASE),
-    re.compile(r"<\|think\|>.*?<\|/?think\|>", re.DOTALL | re.IGNORECASE),
-    re.compile(r"\|thought\|.*?\|/?thought\|", re.DOTALL | re.IGNORECASE),
-    re.compile(r"\|think\|.*?\|/?think\|", re.DOTALL | re.IGNORECASE),
-    re.compile(r"\[THINK\].*?\[/THINK\]", re.DOTALL | re.IGNORECASE),
-    re.compile(
-        r"^(?:<think>|<thought>|<\|thought\|>|\[THINK\]).*?(?:\n\n|\Z)",
-        re.DOTALL | re.IGNORECASE,
-    ),
-]
 
 
 class AgenticLoop:
@@ -49,12 +33,7 @@ class AgenticLoop:
         self.stream = stream
 
     def _sanitize(self, text: str) -> str:
-        if not text:
-            return ""
-        cleaned = text
-        for pattern in THINK_PATTERNS:
-            cleaned = pattern.sub("", cleaned)
-        return cleaned.strip()
+        return sanitize_thinking_tags(text)
 
     def _accumulate_tool_call_delta(
         self, accumulated: dict[int, dict[str, Any]], tc_delta: Any
@@ -163,15 +142,22 @@ class AgenticLoop:
         messages: list[dict[str, Any]],
         on_status: Callable[[str], Awaitable[None]] | None,
     ) -> None:
-        multimodal_content: list[dict[str, Any]] = []
+        display_names = []
         for tc in tool_calls:
             fn_name = tc["function"]["name"]
             tool_obj = self.tool_registry.get(fn_name)
-            display_name = tool_obj.display_name if tool_obj else fn_name
+            display_names.append(tool_obj.display_name if tool_obj else fn_name)
 
-            if on_status:
-                await on_status(f"Calling: {display_name}...")
+        if on_status and display_names:
+            status_text = ", ".join(display_names)
+            if len(status_text) > 80:
+                status_text = f"{len(display_names)} tools"
+            await on_status(f"Calling: {status_text}...")
 
+        async def _run_single_tool(
+            tc: dict[str, Any],
+        ) -> tuple[dict[str, Any], str, str | ToolResult]:
+            fn_name = tc["function"]["name"]
             args = self._parse_tool_arguments(tc["function"]["arguments"])
             started_at = time.monotonic()
             logger.info(
@@ -188,7 +174,12 @@ class AgenticLoop:
                 not result_text.startswith("Error"),
                 time.monotonic() - started_at,
             )
+            return tc, result_text, result
 
+        multimodal_content: list[dict[str, Any]] = []
+        for tool_call in tool_calls:
+            tc, result_text, result = await _run_single_tool(tool_call)
+            fn_name = tc["function"]["name"]
             messages.append(
                 {
                     "role": "tool",
@@ -267,7 +258,9 @@ class AgenticLoop:
                     error,
                 )
                 if on_status:
-                    await on_status("Video input is unsupported; retrying with sampled frames...")
+                    await on_status(
+                        "Video input is unsupported; retrying with sampled frames..."
+                    )
                 if should_stream:
                     content, tool_calls = await self._stream_step(
                         current_messages, tools, on_status, on_chunk

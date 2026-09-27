@@ -57,6 +57,79 @@ async def _deliver_generated_images(
             file.close()
 
 
+async def _run_agent_with_image_fallback(
+    agent_loop: AgenticLoop,
+    messages: list[dict[str, Any]],
+    context: ToolContext,
+    on_status: Callable[[str], Awaitable[None]],
+    on_error: Callable[[str], Awaitable[None]],
+    on_chunk: Callable[[str], Awaitable[None]] | None,
+    streamer: MessageStreamer | None,
+    request_id: str,
+    deliver_generated_images: Callable[[], Awaitable[None]],
+) -> str | None:
+    has_images = any(isinstance(message.get("content"), list) for message in messages)
+    try:
+        return await agent_loop.run(
+            messages, context, on_status=on_status, on_chunk=on_chunk
+        )
+    except Exception as error:
+        error_text = str(error)
+        vision_unsupported = is_vision_unsupported_error(error_text)
+        empty_response = "provider returned an empty response" in error_text.lower()
+        if has_images and (vision_unsupported or empty_response):
+            logger.info(
+                "Model rejected image input or provider returned empty response; retrying without images request_id=%s",
+                request_id,
+            )
+        else:
+            logger.exception("Agent request failed request_id=%s", request_id)
+            if streamer:
+                await streamer.stop(delete_followups=bool(context.generated_images))
+            if vision_unsupported:
+                error_text += (
+                    f"\nNote: The configured model ({settings.ai_model}) may not "
+                    "support multimodal/image inputs."
+                )
+            await on_error(error_text)
+            await deliver_generated_images()
+            return None
+
+        try:
+            status_text = (
+                "Model does not support images; retrying as text..."
+                if vision_unsupported
+                else "Image processing failed on upstream provider; retrying as text..."
+            )
+            await on_status(status_text)
+            text_only_messages = convert_messages_to_text_only(messages)
+            answer = await agent_loop.run(
+                text_only_messages,
+                context,
+                on_status=on_status,
+                on_chunk=on_chunk,
+            )
+        except Exception as retry_error:
+            logger.exception("Text-only retry failed request_id=%s", request_id)
+            if streamer:
+                await streamer.stop(delete_followups=bool(context.generated_images))
+            await on_error(f"{error_text}\n(Retry as text also failed: {retry_error})")
+            await deliver_generated_images()
+            return None
+
+        if vision_unsupported:
+            note = (
+                f"-# *Note: `{settings.ai_model}` does not support image analysis; "
+                "responded to text only.*"
+            )
+        else:
+            note = (
+                f"-# *Note: Upstream provider returned an empty response for `{settings.ai_model}` "
+                "when processing the image; responded to text only.*"
+            )
+        return f"{answer}\n\n{note}".strip()
+
+
 def should_respond(message: discord.Message, client_user: discord.ClientUser) -> bool:
     if message.author.id == client_user.id:
         return False
@@ -100,35 +173,28 @@ async def get_referenced_message(
     return None
 
 
-async def _execute_chat_pipeline(
+async def _build_chat_request(
     user: discord.User | discord.Member,
     channel: discord.abc.Messageable,
     guild: discord.Guild | None,
     client_user: discord.ClientUser | None,
     prompt: str,
     request_id: str,
-    streamer: MessageStreamer | None,
     agent_loop: AgenticLoop,
-    on_status: Callable[[str], Awaitable[None]],
-    on_error: Callable[[str], Awaitable[None]],
-    on_fallback_send: Callable[[list[str]], Awaitable[None]] | None = None,
-    before_message: discord.Message | None = None,
-    exclude_message_id: int | None = None,
-    media_parts: list[dict[str, Any]] | None = None,
-    generation_image_parts: list[dict[str, Any]] | None = None,
-    video_fallbacks: dict[str, list[dict[str, Any]]] | None = None,
-    on_generated_images: Callable[[list[GeneratedImage]], Awaitable[None]]
-    | None = None,
-) -> bool:
+    before_message: discord.Message | None,
+    exclude_message_id: int | None,
+    media_parts: list[dict[str, Any]] | None,
+    generation_image_parts: list[dict[str, Any]] | None,
+    video_fallbacks: dict[str, list[dict[str, Any]]] | None,
+) -> tuple[list[dict[str, Any]], ToolContext]:
     channel_id = getattr(channel, "id", user.id)
-    sys_prompt = build_system_prompt(
+    system_prompt = build_system_prompt(
         settings.ai_system_prompt_path,
         user,
         channel,
         guild,
         tool_registry=agent_loop.tool_registry,
     )
-
     history_turns: list[dict[str, Any]] = []
     if isinstance(channel, discord.abc.Messageable):
         history_turns = await get_channel_context_messages(
@@ -140,20 +206,15 @@ async def _execute_chat_pipeline(
             video_fallbacks=video_fallbacks,
         )
 
-    current_author_label = f"[{user.display_name} (@{user.name})]"
-    current_user_text = f"{current_author_label}: {prompt}"
-    current_turn_content = format_turn_content(current_user_text, media_parts)
-
-    all_turns = list(history_turns)
-    if all_turns and all_turns[-1]["role"] == "user":
-        all_turns[-1]["content"] = merge_turn_contents(
-            all_turns[-1]["content"], current_turn_content
-        )
+    current_author = f"[{user.display_name} (@{user.name})]"
+    current_turn = format_turn_content(f"{current_author}: {prompt}", media_parts)
+    turns = list(history_turns)
+    if turns and turns[-1]["role"] == "user":
+        turns[-1]["content"] = merge_turn_contents(turns[-1]["content"], current_turn)
     else:
-        all_turns.append({"role": "user", "content": current_turn_content})
+        turns.append({"role": "user", "content": current_turn})
 
-    messages = [{"role": "system", "content": sys_prompt}] + all_turns
-
+    messages = [{"role": "system", "content": system_prompt}, *turns]
     image_count = sum(
         part.get("type") == "image_url"
         for message in messages
@@ -183,6 +244,64 @@ async def _execute_chat_pipeline(
         ),
         video_fallbacks=video_fallbacks or {},
     )
+    return messages, context
+
+
+async def _deliver_chat_response(
+    answer: str,
+    streamer: MessageStreamer | None,
+    on_fallback_send: Callable[[list[str]], Awaitable[None]] | None,
+    deliver_generated_images: Callable[[], Awaitable[None]],
+    request_id: str,
+) -> None:
+    if streamer:
+        await streamer.finalize(answer)
+    elif on_fallback_send:
+        await on_fallback_send(split_content(answer))
+
+    await deliver_generated_images()
+    logger.info(
+        "Response handling finished request_id=%s response_chars=%d streaming=%s",
+        request_id,
+        len(answer),
+        streamer is not None,
+    )
+
+
+async def _execute_chat_pipeline(
+    user: discord.User | discord.Member,
+    channel: discord.abc.Messageable,
+    guild: discord.Guild | None,
+    client_user: discord.ClientUser | None,
+    prompt: str,
+    request_id: str,
+    streamer: MessageStreamer | None,
+    agent_loop: AgenticLoop,
+    on_status: Callable[[str], Awaitable[None]],
+    on_error: Callable[[str], Awaitable[None]],
+    on_fallback_send: Callable[[list[str]], Awaitable[None]] | None = None,
+    before_message: discord.Message | None = None,
+    exclude_message_id: int | None = None,
+    media_parts: list[dict[str, Any]] | None = None,
+    generation_image_parts: list[dict[str, Any]] | None = None,
+    video_fallbacks: dict[str, list[dict[str, Any]]] | None = None,
+    on_generated_images: Callable[[list[GeneratedImage]], Awaitable[None]]
+    | None = None,
+) -> bool:
+    messages, context = await _build_chat_request(
+        user,
+        channel,
+        guild,
+        client_user,
+        prompt,
+        request_id,
+        agent_loop,
+        before_message,
+        exclude_message_id,
+        media_parts,
+        generation_image_parts,
+        video_fallbacks,
+    )
 
     async def deliver_generated_images() -> None:
         if not context.generated_images or not on_generated_images:
@@ -196,80 +315,27 @@ async def _execute_chat_pipeline(
 
     on_chunk = streamer.feed if streamer else None
 
-    has_images = any(isinstance(message.get("content"), list) for message in messages)
-    try:
-        answer = await agent_loop.run(
-            messages, context, on_status=on_status, on_chunk=on_chunk
-        )
-    except Exception as error:
-        err_msg = str(error)
-        vision_unsupported = is_vision_unsupported_error(err_msg)
-        is_empty_response = "provider returned an empty response" in err_msg.lower()
-        should_retry_text = has_images and (vision_unsupported or is_empty_response)
-        if should_retry_text:
-            logger.info(
-                "Model rejected image input or provider returned empty response; retrying without images request_id=%s",
-                request_id,
-            )
-        else:
-            logger.exception("Agent request failed request_id=%s", request_id)
-        if not should_retry_text:
-            if streamer:
-                await streamer.stop(delete_followups=bool(context.generated_images))
-            if vision_unsupported:
-                err_msg += (
-                    f"\nNote: The configured model ({settings.ai_model}) may not "
-                    "support multimodal/image inputs."
-                )
-            await on_error(err_msg)
-            await deliver_generated_images()
-            return False
-
-        try:
-            status_text = (
-                "Model does not support images; retrying as text..."
-                if vision_unsupported
-                else "Image processing failed on upstream provider; retrying as text..."
-            )
-            await on_status(status_text)
-            text_only_messages = convert_messages_to_text_only(messages)
-            answer = await agent_loop.run(
-                text_only_messages, context, on_status=on_status, on_chunk=on_chunk
-            )
-        except Exception as retry_error:
-            logger.exception("Text-only retry failed request_id=%s", request_id)
-            if streamer:
-                await streamer.stop(delete_followups=bool(context.generated_images))
-            await on_error(f"{err_msg}\n(Retry as text also failed: {retry_error})")
-            await deliver_generated_images()
-            return False
-
-        if vision_unsupported:
-            note = (
-                f"-# *Note: `{settings.ai_model}` does not support image analysis; "
-                "responded to text only.*"
-            )
-        else:
-            note = (
-                f"-# *Note: Upstream provider returned an empty response for `{settings.ai_model}` "
-                "when processing the image; responded to text only.*"
-            )
-        answer = f"{answer}\n\n{note}".strip()
-
-    if streamer:
-        await streamer.finalize(answer)
-    elif on_fallback_send:
-        await on_fallback_send(split_content(answer))
-
-    await deliver_generated_images()
-
-    logger.info(
-        "Response handling finished request_id=%s response_chars=%d streaming=%s",
+    answer = await _run_agent_with_image_fallback(
+        agent_loop,
+        messages,
+        context,
+        on_status,
+        on_error,
+        on_chunk,
+        streamer,
         request_id,
-        len(answer),
-        streamer is not None,
+        deliver_generated_images,
     )
+    if answer is None:
+        return False
 
+    await _deliver_chat_response(
+        answer,
+        streamer,
+        on_fallback_send,
+        deliver_generated_images,
+        request_id,
+    )
     return True
 
 
@@ -297,18 +363,23 @@ async def handle_message_event(
     prompt = clean_prompt(message.content, client_user)
     has_user_prompt = bool(prompt)
 
-    attachment_notes = []
-    for attachment in message.attachments:
-        if is_video_attachment(attachment):
-            attachment_notes.append(f"[Video: {attachment.filename}]")
-        elif is_image_attachment(attachment):
-            attachment_notes.append(f"[Image: {attachment.filename}]")
-        else:
+    attachment_notes: list[str] = []
+    if message.attachments:
+
+        async def _extract_note(attachment: discord.Attachment) -> str:
+            if is_video_attachment(attachment):
+                return f"[Video: {attachment.filename}]"
+            elif is_image_attachment(attachment):
+                return f"[Image: {attachment.filename}]"
             attachment_content = await attachment_to_text(attachment)
-            attachment_notes.append(
+            return (
                 f"[Attachment: {attachment.filename} ({attachment.url})]\n"
                 f"{attachment_content}"
             )
+
+        attachment_notes = [
+            await _extract_note(attachment) for attachment in message.attachments
+        ]
     if attachment_notes:
         prompt = "\n".join(part for part in [prompt, *attachment_notes] if part)
 
@@ -342,7 +413,9 @@ async def handle_message_event(
         if current_media_parts or attachment_notes:
             instruction = "Please analyze the attached image, GIF, video, or file."
             if len(current_media_parts) + len(attachment_notes) > 1:
-                instruction = "Please analyze the attached images, GIFs, videos, and files."
+                instruction = (
+                    "Please analyze the attached images, GIFs, videos, and files."
+                )
             prompt = f"{instruction}\n{prompt}".strip()
         elif is_reply and ref_message:
             prompt = f"Please respond to the referenced message.\n{prompt}".strip()
@@ -415,4 +488,3 @@ async def handle_message_event(
         video_fallbacks=video_fallbacks,
         on_generated_images=on_generated_images,
     )
-

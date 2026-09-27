@@ -8,79 +8,74 @@ logger = logging.getLogger(__name__)
 def split_content(text: str, limit: int = 2000) -> list[str]:
     if not text or not text.strip():
         return ["*(No response generated)*"]
+    if limit <= 0:
+        raise ValueError("limit must be positive")
     if len(text) <= limit:
         return [text]
+    if limit < 16:
+        return [text[index : index + limit] for index in range(0, len(text), limit)]
 
-    chunks = []
-    current_chunk = ""
+    chunks: list[str] = []
+    current = ""
     in_code_block = False
     code_lang = ""
 
+    def code_prefix() -> str:
+        prefix = f"```{code_lang}\n" if code_lang else "```\n"
+        return prefix if len(prefix) + 4 < limit else "```\n"
+
     def push_chunk() -> None:
-        nonlocal current_chunk
-        if not current_chunk:
+        nonlocal current
+        if not current:
             return
         if in_code_block:
-            current_chunk += "\n```"
-        chunks.append(current_chunk)
-        current_chunk = f"```{code_lang}\n" if in_code_block else ""
+            current += "\n```"
+        chunks.append(current)
+        current = code_prefix() if in_code_block else ""
 
-    def append_token(token: str) -> None:
-        nonlocal current_chunk
-        closing_fence = "\n```" if in_code_block else ""
-        if len(current_chunk) + len(token) + len(closing_fence) <= limit:
-            current_chunk += token
-            return
+    def append_text(value: str) -> None:
+        nonlocal current
+        while value:
+            suffix_size = 4 if in_code_block else 0
+            available = limit - len(current) - suffix_size
+            if available <= 0:
+                push_chunk()
+                available = limit - len(current) - suffix_size
+            if available <= 0:
+                current = "```\n" if in_code_block else ""
+                available = limit - len(current) - suffix_size
+            take = min(available, len(value))
+            current += value[:take]
+            value = value[take:]
+            if value:
+                push_chunk()
 
-        push_chunk()
-        while len(token) + (len("\n```") if in_code_block else 0) > limit:
-            closing_len = len("\n```") if in_code_block else 0
-            cut = limit - closing_len - len(current_chunk)
-            current_chunk += token[:cut]
-            token = token[cut:]
-            push_chunk()
-
-        current_chunk += token
-
-    lines = text.split("\n")
-    for line in lines:
-        line_to_add = line if not current_chunk else "\n" + line
-        stripped_line = line.strip()
-        is_code_fence = stripped_line.startswith("```")
-
-        next_in_code_block = not in_code_block if is_code_fence else in_code_block
-        next_code_lang = (
-            stripped_line[3:].strip()
-            if is_code_fence and not in_code_block
-            else ("" if is_code_fence else code_lang)
+    for line in text.splitlines(keepends=True):
+        is_fence = line.strip().startswith("```")
+        line_to_add = (
+            line if not current else ("" if current.endswith("\n") else "\n") + line
         )
-
-        closing_fence = "\n```" if in_code_block else ""
-        if len(current_chunk) + len(line_to_add) + len(closing_fence) <= limit:
-            current_chunk += line_to_add
+        next_code_state = not in_code_block if is_fence else in_code_block
+        suffix_size = 4 if in_code_block or next_code_state else 0
+        if len(current) + len(line_to_add) + suffix_size <= limit:
+            current += line_to_add
         else:
-            if current_chunk:
+            if current:
                 push_chunk()
                 line_to_add = line
+            append_text(line_to_add)
 
-            closing_fence = "\n```" if in_code_block else ""
-            if len(current_chunk) + len(line_to_add) + len(closing_fence) <= limit:
-                current_chunk += line_to_add
+        if is_fence:
+            if in_code_block:
+                in_code_block = False
+                code_lang = ""
             else:
-                words = line.split(" ")
-                for word in words:
-                    prefix = (
-                        "" if not current_chunk or current_chunk.endswith("\n") else " "
-                    )
-                    append_token(prefix + word)
+                in_code_block = True
+                code_lang = line.strip()[3:].strip()
 
-        in_code_block = next_in_code_block
-        code_lang = next_code_lang
-
-    if current_chunk:
-        chunks.append(current_chunk)
-
-    return [c for c in chunks if c.strip()] or ["*(No response generated)*"]
+    if current:
+        chunks.append(current)
+    return [chunk for chunk in chunks if chunk.strip()] or ["*(No response generated)*"]
 
 
 class DiscordMessenger:

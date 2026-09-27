@@ -1,37 +1,45 @@
 import re
 from collections.abc import Awaitable, Callable
 
-OPEN_TAG_PATTERNS: list[tuple[re.Pattern, re.Pattern]] = [
-    (re.compile(r"^\s*<think>", re.IGNORECASE), re.compile(r"</think>", re.IGNORECASE)),
-    (
-        re.compile(r"^\s*<thought>", re.IGNORECASE),
-        re.compile(r"</thought>", re.IGNORECASE),
-    ),
-    (
-        re.compile(r"^\s*<reasoning>", re.IGNORECASE),
-        re.compile(r"</reasoning>", re.IGNORECASE),
-    ),
-    (
-        re.compile(r"^\s*<\|thought\|>", re.IGNORECASE),
-        re.compile(r"<\|/?thought\|>", re.IGNORECASE),
-    ),
-    (
-        re.compile(r"^\s*<\|think\|>", re.IGNORECASE),
-        re.compile(r"<\|/?think\|>", re.IGNORECASE),
-    ),
-    (
-        re.compile(r"^\s*\|thought\|", re.IGNORECASE),
-        re.compile(r"\|/?thought\|", re.IGNORECASE),
-    ),
-    (
-        re.compile(r"^\s*\|think\|", re.IGNORECASE),
-        re.compile(r"\|/?think\|", re.IGNORECASE),
-    ),
-    (
-        re.compile(r"^\s*\[THINK\]", re.IGNORECASE),
-        re.compile(r"\[/THINK\]", re.IGNORECASE),
-    ),
+_THINK_TAGS = [
+    (r"<think>", r"</think>"),
+    (r"<thought>", r"</thought>"),
+    (r"<reasoning>", r"</reasoning>"),
+    (r"<\|thought\|>", r"<\|/?thought\|>"),
+    (r"<\|think\|>", r"<\|/?think\|>"),
+    (r"\|thought\|", r"\|/?thought\|"),
+    (r"\|think\|", r"\|/?think\|"),
+    (r"\[THINK\]", r"\[/THINK\]"),
 ]
+
+OPEN_TAG_PATTERNS: list[tuple[re.Pattern, re.Pattern]] = [
+    (
+        re.compile(r"^\s*" + opening, re.IGNORECASE),
+        re.compile(closing, re.IGNORECASE),
+    )
+    for opening, closing in _THINK_TAGS
+]
+
+FULL_THINK_PATTERNS: list[re.Pattern] = [
+    re.compile(opening + r".*?" + closing, re.DOTALL | re.IGNORECASE)
+    for opening, closing in _THINK_TAGS
+]
+FULL_THINK_PATTERNS.append(
+    re.compile(
+        r"^(?:<think>|<thought>|<\|thought\|>|\[THINK\]).*?(?:\n\n|\Z)",
+        re.DOTALL | re.IGNORECASE,
+    )
+)
+
+
+def sanitize_thinking_tags(text: str) -> str:
+    """Strip all thinking/reasoning tags and their contents from a complete text string."""
+    if not text:
+        return ""
+    cleaned = text
+    for pattern in FULL_THINK_PATTERNS:
+        cleaned = pattern.sub("", cleaned)
+    return cleaned.strip()
 
 
 class StreamingSanitizer:

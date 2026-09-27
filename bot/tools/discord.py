@@ -171,7 +171,9 @@ class DiscordThreadCreateTool(DiscordTool):
                 return "Error: The current channel could not be resolved."
             channel_type = getattr(channel, "type", None)
             if channel_type not in (discord.ChannelType.text, discord.ChannelType.news):
-                return "Error: Threads can only be created from messages in text channels."
+                return (
+                    "Error: Threads can only be created from messages in text channels."
+                )
             message, error = await self._get_message(context, channel, message_id)
             if error:
                 return error

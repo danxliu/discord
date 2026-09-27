@@ -86,7 +86,9 @@ def _run(command: list[str]) -> subprocess.CompletedProcess[bytes]:
     except FileNotFoundError as error:
         raise MediaProcessingError("FFmpeg is not installed.") from error
     except subprocess.TimeoutExpired as error:
-        raise MediaProcessingError("Video processing exceeded its time limit.") from error
+        raise MediaProcessingError(
+            "Video processing exceeded its time limit."
+        ) from error
     if result.returncode:
         detail = result.stderr.decode("utf-8", errors="replace")[-500:]
         logger.debug("Media command failed: %s", detail)
@@ -110,7 +112,9 @@ def _duration_seconds(input_path: Path) -> float:
     try:
         duration = float(json.loads(result.stdout).get("format", {}).get("duration"))
     except (ValueError, TypeError, json.JSONDecodeError) as error:
-        raise MediaProcessingError("The video duration could not be determined.") from error
+        raise MediaProcessingError(
+            "The video duration could not be determined."
+        ) from error
     if duration <= 0:
         raise MediaProcessingError("The video has no playable duration.")
     if duration > MAX_VIDEO_DURATION_SECONDS:
@@ -157,7 +161,9 @@ def _sample_frames(video_path: Path, duration: float) -> list[dict[str, Any]]:
         frames.append(image_data_part(data[image_start : image_end + 2], "image/jpeg"))
         start = image_end + 2
     if not frames:
-        raise MediaProcessingError("No readable frames could be extracted from the video.")
+        raise MediaProcessingError(
+            "No readable frames could be extracted from the video."
+        )
     return frames
 
 
@@ -175,7 +181,9 @@ def _prepare_video(data: bytes, content_type: str, source: str) -> PreparedVideo
     if not mime.startswith("video/"):
         mime = "image/gif" if is_animated_gif(data) else mime
     if not (mime.startswith("video/") or is_animated_gif(data)):
-        raise MediaProcessingError("The media is not a supported video or animated GIF.")
+        raise MediaProcessingError(
+            "The media is not a supported video or animated GIF."
+        )
 
     animated = is_animated_gif(data)
     suffix = ".gif" if animated else (Path(source.split("?", 1)[0]).suffix or ".video")
@@ -237,3 +245,44 @@ async def prepare_video(
     import asyncio
 
     return await asyncio.to_thread(_prepare_video, data, content_type, source)
+
+
+def is_video_unsupported_error(err: str) -> bool:
+    """Detect if an error indicates the upstream model does not support video_url input."""
+    err_lower = err.lower()
+    return "video_url" in err_lower or any(
+        phrase in err_lower
+        for phrase in (
+            "video input is not supported",
+            "does not support video",
+            "doesn't support video",
+            "video is not supported",
+            "unsupported video input",
+        )
+    )
+
+
+def replace_video_parts_with_fallbacks(
+    messages: list[dict[str, Any]],
+    fallbacks: dict[str, list[dict[str, Any]]],
+) -> bool:
+    """Replace video_url parts in conversation messages with sampled fallback image frames."""
+    replaced = False
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        new_content: list[dict[str, Any]] = []
+        for part in content:
+            if part.get("type") != "video_url":
+                new_content.append(part)
+                continue
+            url = part.get("video_url", {}).get("url")
+            frames = fallbacks.get(url) if isinstance(url, str) else None
+            if not frames:
+                new_content.append(part)
+                continue
+            new_content.extend(frames)
+            replaced = True
+        message["content"] = new_content
+    return replaced

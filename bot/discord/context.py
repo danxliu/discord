@@ -24,7 +24,7 @@ def clean_prompt(content: str, client_user: discord.ClientUser | None = None) ->
     return cleaned.strip()
 
 
-def extract_message_text(msg: discord.Message) -> str:
+def extract_message_text(msg: discord.Message, include_attachments: bool = True) -> str:
     parts = []
     if msg.content:
         parts.append(msg.content)
@@ -38,13 +38,14 @@ def extract_message_text(msg: discord.Message) -> str:
             embed_parts.append(f"{field.name}: {field.value}")
         if embed_parts:
             parts.append("\n".join(embed_parts))
-    for attachment in msg.attachments:
-        if is_video_attachment(attachment):
-            parts.append(f"[Video: {attachment.filename}]")
-        elif is_image_attachment(attachment):
-            parts.append(f"[Image: {attachment.filename}]")
-        else:
-            parts.append(f"[Attachment: {attachment.filename} ({attachment.url})]")
+    if include_attachments:
+        for attachment in msg.attachments:
+            if is_video_attachment(attachment):
+                parts.append(f"[Video: {attachment.filename}]")
+            elif is_image_attachment(attachment):
+                parts.append(f"[Image: {attachment.filename}]")
+            else:
+                parts.append(f"[Attachment: {attachment.filename} ({attachment.url})]")
     return "\n\n".join(parts).strip()
 
 
@@ -79,41 +80,57 @@ async def get_channel_context_messages(
     ]
 
     msg_image_parts: dict[int, list[dict[str, Any]]] = {}
-    for msg in reversed(valid_messages):
-        if client_id and msg.author.id == client_id:
-            continue
-        if any(
-            is_image_attachment(attachment) or is_video_attachment(attachment)
-            for attachment in msg.attachments
-        ) or extract_image_urls_from_text_and_embeds(
-            msg.content, msg.embeds
-        ) or extract_video_urls_from_text_and_embeds(msg.content, msg.embeds):
-            loaded, fallbacks = await load_media_from_message(msg)
-            if loaded:
-                msg_image_parts[msg.id] = loaded
-            if video_fallbacks is not None:
-                video_fallbacks.update(fallbacks)
+
+    media_messages = [
+        msg
+        for msg in valid_messages
+        if not (client_id and msg.author.id == client_id)
+        and (
+            any(
+                is_image_attachment(attachment) or is_video_attachment(attachment)
+                for attachment in msg.attachments
+            )
+            or extract_image_urls_from_text_and_embeds(msg.content, msg.embeds)
+            or extract_video_urls_from_text_and_embeds(msg.content, msg.embeds)
+        )
+    ]
+    for msg in media_messages:
+        loaded, fallbacks = await load_media_from_message(msg)
+        if loaded:
+            msg_image_parts[msg.id] = loaded
+        if video_fallbacks is not None:
+            video_fallbacks.update(fallbacks)
+
+    text_attachment_items = [
+        (msg.id, att)
+        for msg in valid_messages
+        if not (client_id and msg.author.id == client_id)
+        for att in msg.attachments
+        if not (is_image_attachment(att) or is_video_attachment(att))
+    ]
+    extracted_attachment_texts: dict[int, list[str]] = {}
+    for msg_id, attachment in text_attachment_items:
+        content = await attachment_to_text(attachment)
+        note = f"Extracted attachment {attachment.filename}:\n{content}"
+        extracted_attachment_texts.setdefault(msg_id, []).append(note)
 
     raw_turns: list[dict[str, Any]] = []
 
     for msg in valid_messages:
-        text = extract_message_text(msg)
         images = msg_image_parts.get(msg.id, [])
 
         if client_id and msg.author.id == client_id:
+            text = extract_message_text(msg)
             if text == "*Thinking...*" or text.startswith("*Thinking"):
                 continue
             raw_turns.append({"role": "assistant", "content": text})
             continue
 
-        for attachment in msg.attachments:
-            if is_image_attachment(attachment) or is_video_attachment(attachment):
-                continue
-            attachment_content = await attachment_to_text(attachment)
-            text = (
-                f"{text}\n\nExtracted attachment {attachment.filename}:\n"
-                f"{attachment_content}"
-            ).strip()
+        text = extract_message_text(msg, include_attachments=False)
+        att_notes = extracted_attachment_texts.get(msg.id, [])
+        if att_notes:
+            att_text = "\n\n".join(att_notes)
+            text = f"{text}\n\n{att_text}".strip() if text else att_text
 
         if not text and not images:
             continue
