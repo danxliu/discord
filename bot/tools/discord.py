@@ -3,8 +3,14 @@ from typing import Any
 
 import discord
 
+from bot.discord.attachments import attachment_to_text
 from bot.discord.context import extract_message_text
-from bot.tools.base import BaseTool, ToolContext
+from bot.discord.image import (
+    is_image_attachment,
+    is_video_attachment,
+    load_media_from_message,
+)
+from bot.tools.base import BaseTool, ToolContext, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -189,7 +195,8 @@ class DiscordThreadCreateTool(DiscordTool):
 class DiscordHistorySearchTool(DiscordTool):
     MAX_SCAN_MESSAGES = 500
     MAX_RESULTS = 10
-    MAX_EXCERPT_LENGTH = 300
+    MAX_MESSAGE_TEXT = 2000
+    MAX_ATTACHMENT_TEXT = 1200
 
     @property
     def name(self) -> str:
@@ -202,8 +209,9 @@ class DiscordHistorySearchTool(DiscordTool):
     @property
     def description(self) -> str:
         return (
-            "Search up to the 500 most recent messages in the current channel for "
-            "a case-insensitive text match, returning at most 10 results."
+            "Search recent messages in the current channel by text, or retrieve a "
+            "bounded window before, after, or around the message that invoked you. "
+            "Results include embeds, attachments, media, and reaction summaries."
         )
 
     @property
@@ -213,32 +221,189 @@ class DiscordHistorySearchTool(DiscordTool):
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Text to find in recent messages in this channel",
+                    "description": "Text to find; required in keyword mode",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["keyword", "relative"],
+                    "description": "Keyword search (default) or messages relative to the invoking message",
+                },
+                "direction": {
+                    "type": "string",
+                    "enum": ["before", "after", "around"],
+                    "description": "Relative mode direction; defaults to around",
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "Maximum number of results, from 1 to 10",
                 },
             },
-            "required": ["query"],
+            "required": [],
         }
 
-    def _excerpt(self, text: str, query: str) -> str:
-        match_at = text.casefold().find(query.casefold())
-        start = max(0, match_at - self.MAX_EXCERPT_LENGTH // 3)
-        end = min(len(text), start + self.MAX_EXCERPT_LENGTH)
-        excerpt = text[start:end]
-        if start:
-            excerpt = "..." + excerpt
-        if end < len(text):
-            excerpt += "..."
-        return excerpt
+    async def _relative_messages(
+        self,
+        context: ToolContext,
+        channel: Any,
+        direction: str,
+        count: int,
+    ) -> list[Any] | str:
+        if context.triggering_message_id is None:
+            return "Error: Relative search requires an invoking message."
+        anchor, error = await self._get_message(
+            context, channel, context.triggering_message_id
+        )
+        if error:
+            return error
+
+        before_count = count if direction == "before" else 0
+        after_count = count if direction == "after" else 0
+        if direction == "around":
+            before_count = (count + 1) // 2
+            after_count = count // 2
+
+        messages: list[Any] = []
+        if before_count:
+            previous = [
+                item
+                async for item in channel.history(limit=before_count, before=anchor)
+            ]
+            messages.extend(reversed(previous))
+        if after_count:
+            following = [
+                item
+                async for item in channel.history(
+                    limit=after_count, after=anchor, oldest_first=True
+                )
+            ]
+            messages.extend(following)
+        return messages
+
+    async def _describe_messages(
+        self,
+        messages: list[Any],
+        context: ToolContext,
+        *,
+        query: str | None = None,
+    ) -> str | ToolResult:
+        lines: list[str] = []
+        multimodal: list[dict[str, Any]] = []
+        video_fallbacks: dict[str, list[dict[str, Any]]] = {}
+        seen_urls: set[str] = set()
+
+        for message in messages[: self.MAX_RESULTS]:
+            text = extract_message_text(message, include_attachments=False)
+            attachment_notes: list[str] = []
+            for attachment in message.attachments:
+                if is_video_attachment(attachment):
+                    attachment_notes.append(
+                        f"[Video attachment: {attachment.filename}]"
+                    )
+                elif is_image_attachment(attachment):
+                    attachment_notes.append(
+                        f"[Image attachment: {attachment.filename}]"
+                    )
+                else:
+                    try:
+                        extracted = await attachment_to_text(
+                            attachment, max_chars=self.MAX_ATTACHMENT_TEXT
+                        )
+                    except Exception:
+                        extracted = f"Could not read attachment {attachment.filename}."
+                    attachment_notes.append(
+                        f"[Attachment: {attachment.filename} ({attachment.url})]\n{extracted}"
+                    )
+            if attachment_notes:
+                text = "\n\n".join([part for part in [text, *attachment_notes] if part])
+
+            reactions = getattr(message, "reactions", None) or []
+            if reactions:
+                text = "\n\n".join(
+                    [
+                        part
+                        for part in [
+                            text,
+                            "Reactions: "
+                            + ", ".join(
+                                f"{reaction.emoji} {reaction.count}"
+                                for reaction in reactions
+                            ),
+                        ]
+                        if part
+                    ]
+                )
+
+            if query and query.casefold() not in text.casefold():
+                continue
+            if len(text) > self.MAX_MESSAGE_TEXT:
+                text = text[: self.MAX_MESSAGE_TEXT - 3] + "..."
+
+            author = getattr(message.author, "display_name", message.author.name)
+            timestamp = getattr(message, "created_at", None)
+            timestamp_text = timestamp.isoformat() if timestamp else "unknown time"
+            lines.append(
+                f"Message {message.id} by {author} at {timestamp_text}:\n{text or '[No text content]'}"
+            )
+
+            media_parts, fallbacks = await load_media_from_message(
+                message, seen_urls=seen_urls
+            )
+            video_fallbacks.update(fallbacks)
+            if media_parts:
+                multimodal.append(
+                    {
+                        "type": "text",
+                        "text": f"Media attached to message {message.id} by {author}.",
+                    }
+                )
+                multimodal.extend(media_parts)
+
+        if not lines:
+            if query:
+                return f"No recent messages matched '{query}' in this channel."
+            return "No messages were found in that relative window."
+
+        heading = (
+            f"Found {len(lines)} recent match(es) for '{query}':"
+            if query
+            else f"Found {len(lines)} message(s) relative to the invoking message:"
+        )
+        result_text = heading + "\n\n" + "\n\n".join(lines)
+        if multimodal:
+            return ToolResult(result_text, multimodal, video_fallbacks)
+        return result_text
 
     async def execute(
         self,
         context: ToolContext,
-        query: str,
+        query: str | None = None,
+        mode: str = "keyword",
+        direction: str = "around",
+        count: int = MAX_RESULTS,
         **kwargs,
-    ) -> str:
-        query = query.strip()
-        if not query:
-            return "Error: The search query cannot be empty."
+    ) -> str | ToolResult:
+        if not isinstance(mode, str):
+            return "Error: Mode must be 'keyword' or 'relative'."
+        mode = mode.strip().lower()
+        if mode not in {"keyword", "relative"}:
+            return "Error: Mode must be 'keyword' or 'relative'."
+        if not isinstance(direction, str) or direction not in {
+            "before",
+            "after",
+            "around",
+        }:
+            return "Error: Direction must be 'before', 'after', or 'around'."
+        try:
+            count = int(count)
+        except (TypeError, ValueError):
+            return "Error: Count must be an integer from 1 to 10."
+        if not 1 <= count <= self.MAX_RESULTS:
+            return "Error: Count must be from 1 to 10."
+        if query is not None and not isinstance(query, str):
+            return "Error: The search query must be text."
+        query = (query or "").strip()
+        if mode == "keyword" and not query:
+            return "Error: The search query cannot be empty in keyword mode."
 
         try:
             channel = await self._get_channel(context)
@@ -247,32 +412,28 @@ class DiscordHistorySearchTool(DiscordTool):
             if not hasattr(channel, "history"):
                 return "Error: This channel does not support message history."
 
+            if mode == "relative":
+                result = await self._relative_messages(
+                    context, channel, direction, count
+                )
+                if isinstance(result, str):
+                    return result
+                return await self._describe_messages(result, context)
+
             matches = []
             async for message in channel.history(limit=self.MAX_SCAN_MESSAGES):
                 text = extract_message_text(message)
                 if query.casefold() not in text.casefold():
                     continue
-                matches.append((message, text))
-                if len(matches) >= self.MAX_RESULTS:
+                matches.append(message)
+                if len(matches) >= min(count, self.MAX_RESULTS):
                     break
+            matches.reverse()
+            return await self._describe_messages(matches, context, query=query)
         except (discord.NotFound, discord.Forbidden, discord.HTTPException) as error:
             self._log_discord_error(context, self.name)
             if isinstance(error, discord.Forbidden):
                 return "Error: Discord denied access to this channel's message history."
             if isinstance(error, discord.NotFound):
-                return "Error: The current channel could not be found."
+                return "Error: Discord could not find the channel, invoking message, or search result."
             return "Error: Discord could not read this channel's history. Please try again later."
-
-        if not matches:
-            return f"No recent messages matched '{query}' in this channel."
-
-        lines = [f"Found {len(matches)} recent match(es) for '{query}':"]
-        for message, text in matches:
-            author = getattr(message.author, "display_name", message.author.name)
-            timestamp = getattr(message, "created_at", None)
-            timestamp_text = timestamp.isoformat() if timestamp else "unknown time"
-            lines.append(
-                f"- Message {message.id} by {author} at {timestamp_text}: "
-                f"{self._excerpt(text, query)}"
-            )
-        return "\n".join(lines)

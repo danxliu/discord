@@ -7,21 +7,8 @@ from uuid import uuid4
 import discord
 
 from bot.agent.loop import AgenticLoop
-from bot.discord.attachments import attachment_to_text
-from bot.discord.context import (
-    clean_prompt,
-    extract_message_text,
-    get_channel_context_messages,
-)
-from bot.discord.image import (
-    convert_messages_to_text_only,
-    format_turn_content,
-    is_image_attachment,
-    is_video_attachment,
-    is_vision_unsupported_error,
-    load_media_from_message,
-    merge_turn_contents,
-)
+from bot.discord.context import clean_prompt, extract_message_text, message_to_turn
+from bot.discord.image import convert_messages_to_text_only, is_vision_unsupported_error
 from bot.discord.messenger import DiscordMessenger, split_content
 from bot.discord.streamer import MessageStreamer
 from bot.memory.prompt import build_system_prompt
@@ -167,7 +154,7 @@ async def get_referenced_message(
         fetched = await channel.fetch_message(message.reference.message_id)
         if isinstance(fetched, discord.Message):
             return fetched
-    except (discord.NotFound, discord.HTTPException, discord.Forbidden):
+    except (discord.NotFound, discord.HTTPException, discord.Forbidden, AttributeError):
         return None
 
     return None
@@ -178,12 +165,10 @@ async def _build_chat_request(
     channel: discord.abc.Messageable,
     guild: discord.Guild | None,
     client_user: discord.ClientUser | None,
-    prompt: str,
     request_id: str,
     agent_loop: AgenticLoop,
-    before_message: discord.Message | None,
-    exclude_message_id: int | None,
-    media_parts: list[dict[str, Any]] | None,
+    context_turns: list[dict[str, Any]],
+    triggering_message_id: int | None,
     generation_image_parts: list[dict[str, Any]] | None,
     video_fallbacks: dict[str, list[dict[str, Any]]] | None,
 ) -> tuple[list[dict[str, Any]], ToolContext]:
@@ -195,24 +180,7 @@ async def _build_chat_request(
         guild,
         tool_registry=agent_loop.tool_registry,
     )
-    history_turns: list[dict[str, Any]] = []
-    if isinstance(channel, discord.abc.Messageable):
-        history_turns = await get_channel_context_messages(
-            channel=channel,
-            client_user=client_user,
-            limit=settings.ai_channel_history_limit,
-            before=before_message,
-            exclude_message_id=exclude_message_id,
-            video_fallbacks=video_fallbacks,
-        )
-
-    current_author = f"[{user.display_name} (@{user.name})]"
-    current_turn = format_turn_content(f"{current_author}: {prompt}", media_parts)
-    turns = list(history_turns)
-    if turns and turns[-1]["role"] == "user":
-        turns[-1]["content"] = merge_turn_contents(turns[-1]["content"], current_turn)
-    else:
-        turns.append({"role": "user", "content": current_turn})
+    turns = list(context_turns)
 
     messages = [{"role": "system", "content": system_prompt}, *turns]
     image_count = sum(
@@ -234,14 +202,10 @@ async def _build_chat_request(
             else None
         ),
         guild_id=guild.id if guild else None,
-        triggering_message_id=before_message.id if before_message else None,
+        triggering_message_id=triggering_message_id,
         request_id=request_id,
         image_count=image_count,
-        current_image_parts=list(
-            generation_image_parts
-            if generation_image_parts is not None
-            else [part for part in media_parts or [] if part.get("type") == "image_url"]
-        ),
+        current_image_parts=list(generation_image_parts or []),
         video_fallbacks=video_fallbacks or {},
     )
     return messages, context
@@ -273,16 +237,14 @@ async def _execute_chat_pipeline(
     channel: discord.abc.Messageable,
     guild: discord.Guild | None,
     client_user: discord.ClientUser | None,
-    prompt: str,
     request_id: str,
     streamer: MessageStreamer | None,
     agent_loop: AgenticLoop,
     on_status: Callable[[str], Awaitable[None]],
     on_error: Callable[[str], Awaitable[None]],
     on_fallback_send: Callable[[list[str]], Awaitable[None]] | None = None,
-    before_message: discord.Message | None = None,
-    exclude_message_id: int | None = None,
-    media_parts: list[dict[str, Any]] | None = None,
+    context_turns: list[dict[str, Any]] | None = None,
+    triggering_message_id: int | None = None,
     generation_image_parts: list[dict[str, Any]] | None = None,
     video_fallbacks: dict[str, list[dict[str, Any]]] | None = None,
     on_generated_images: Callable[[list[GeneratedImage]], Awaitable[None]]
@@ -293,12 +255,10 @@ async def _execute_chat_pipeline(
         channel,
         guild,
         client_user,
-        prompt,
         request_id,
         agent_loop,
-        before_message,
-        exclude_message_id,
-        media_parts,
+        context_turns or [],
+        triggering_message_id,
         generation_image_parts,
         video_fallbacks,
     )
@@ -358,69 +318,66 @@ async def handle_message_event(
         len(message.attachments),
     )
     is_reply = bool(message.reference and message.reference.message_id)
-    ref_message = await get_referenced_message(message) if is_reply else None
+    is_mention_trigger = client_user in message.mentions
+    ref_message = (
+        await get_referenced_message(message)
+        if is_reply and not is_mention_trigger
+        else None
+    )
+    reply_context_message = (
+        ref_message
+        if not is_mention_trigger
+        and ref_message
+        and ref_message.author.id == client_user.id
+        else None
+    )
 
-    prompt = clean_prompt(message.content, client_user)
+    prompt = clean_prompt(
+        extract_message_text(message, include_attachments=False), client_user
+    )
     has_user_prompt = bool(prompt)
+    if not has_user_prompt and not message.attachments and not is_reply:
+        return
 
-    attachment_notes: list[str] = []
-    if message.attachments:
-
-        async def _extract_note(attachment: discord.Attachment) -> str:
-            if is_video_attachment(attachment):
-                return f"[Video: {attachment.filename}]"
-            elif is_image_attachment(attachment):
-                return f"[Image: {attachment.filename}]"
-            attachment_content = await attachment_to_text(attachment)
-            return (
-                f"[Attachment: {attachment.filename} ({attachment.url})]\n"
-                f"{attachment_content}"
+    seen_urls: set[str] = set()
+    video_fallbacks: dict[str, list[dict[str, Any]]] = {}
+    context_turns: list[dict[str, Any]] = []
+    if not has_user_prompt:
+        if message.attachments:
+            instruction = "Please analyze the attached image, GIF, video, or file."
+            if len(message.attachments) > 1:
+                instruction = (
+                    "Please analyze the attached images, GIFs, videos, and files."
+                )
+            prompt = instruction
+        elif is_reply:
+            prompt = (
+                "Please respond to the referenced message."
+                if reply_context_message
+                else "Please respond to this message."
             )
 
-        attachment_notes = [
-            await _extract_note(attachment) for attachment in message.attachments
-        ]
-    if attachment_notes:
-        prompt = "\n".join(part for part in [prompt, *attachment_notes] if part)
-
-    if is_reply and ref_message:
-        ref_text = clean_prompt(extract_message_text(ref_message), client_user)
-        if len(ref_text) > 300:
-            ref_text = ref_text[:297] + "..."
-        speaker = (
-            "Assistant"
-            if client_user and ref_message.author.id == client_user.id
-            else f"{ref_message.author.display_name} (@{ref_message.author.name})"
-        )
-        prompt = f'(Replying to {speaker}: "{ref_text}")\n{prompt}'.strip()
-    seen_urls: set[str] = set()
-    current_media_parts, video_fallbacks = await load_media_from_message(
+    current_turn, current_fallbacks = await message_to_turn(
         message,
+        client_user,
+        text_override=prompt,
         seen_urls=seen_urls,
+    )
+    video_fallbacks.update(current_fallbacks)
+    if reply_context_message:
+        reply_turn, reply_fallbacks = await message_to_turn(
+            reply_context_message, client_user, seen_urls=seen_urls
+        )
+        context_turns.append(reply_turn)
+        video_fallbacks.update(reply_fallbacks)
+    context_turns.append(current_turn)
+    current_media_parts = (
+        current_turn["content"] if isinstance(current_turn["content"], list) else []
     )
     generation_image_parts = [
         part for part in current_media_parts if part.get("type") == "image_url"
     ]
-    if ref_message:
-        referenced_parts, referenced_fallbacks = await load_media_from_message(
-            ref_message,
-            seen_urls=seen_urls,
-        )
-        current_media_parts.extend(referenced_parts)
-        video_fallbacks.update(referenced_fallbacks)
-
-    if not has_user_prompt:
-        if current_media_parts or attachment_notes:
-            instruction = "Please analyze the attached image, GIF, video, or file."
-            if len(current_media_parts) + len(attachment_notes) > 1:
-                instruction = (
-                    "Please analyze the attached images, GIFs, videos, and files."
-                )
-            prompt = f"{instruction}\n{prompt}".strip()
-        elif is_reply and ref_message:
-            prompt = f"Please respond to the referenced message.\n{prompt}".strip()
-        else:
-            return
+    image_count = sum(part.get("type") == "image_url" for part in current_media_parts)
 
     logger.debug(
         "Discord message request prepared request_id=%s user_id=%s channel_id=%s guild_id=%s prompt_chars=%d attachments=%d images=%d",
@@ -430,7 +387,7 @@ async def handle_message_event(
         message.guild.id if message.guild else None,
         len(prompt),
         len(message.attachments),
-        len(current_media_parts),
+        image_count,
     )
     status_msg = await DiscordMessenger.safe_send(
         message.channel, "*Thinking...*", reply_to=message
@@ -474,16 +431,14 @@ async def handle_message_event(
         channel=message.channel,
         guild=message.guild,
         client_user=client_user,
-        prompt=prompt,
         request_id=request_id,
         streamer=streamer,
         agent_loop=agent_loop,
         on_status=status_callback,
         on_error=on_error,
         on_fallback_send=on_fallback_send,
-        before_message=message,
-        exclude_message_id=status_msg.id,
-        media_parts=current_media_parts,
+        context_turns=context_turns,
+        triggering_message_id=message.id,
         generation_image_parts=generation_image_parts,
         video_fallbacks=video_fallbacks,
         on_generated_images=on_generated_images,

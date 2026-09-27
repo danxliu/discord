@@ -4,7 +4,7 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 
 from bot.agent.sanitizer import StreamingSanitizer, sanitize_thinking_tags
 from bot.tools.base import ToolContext, ToolRegistry, ToolResult
@@ -25,12 +25,34 @@ class AgenticLoop:
         tool_registry: ToolRegistry,
         max_iterations: int = 10,
         stream: bool = True,
+        reasoning_effort: str = "medium",
     ):
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self.model = model
         self.tool_registry = tool_registry
         self.max_iterations = max_iterations
         self.stream = stream
+        self.reasoning_effort = reasoning_effort
+        self._reasoning_effort_supported = True
+
+    async def _create_completion(self, **kwargs: Any):
+        if not self._reasoning_effort_supported:
+            return await self.client.chat.completions.create(**kwargs)
+
+        try:
+            return await self.client.chat.completions.create(
+                **kwargs, reasoning_effort=self.reasoning_effort
+            )
+        except BadRequestError as error:
+            error_text = str(error).lower()
+            if "reasoning_effort" not in error_text:
+                raise
+            logger.info(
+                "Model or provider does not support reasoning_effort; retrying without it model=%s",
+                self.model,
+            )
+            self._reasoning_effort_supported = False
+            return await self.client.chat.completions.create(**kwargs)
 
     def _sanitize(self, text: str) -> str:
         return sanitize_thinking_tags(text)
@@ -67,7 +89,7 @@ class AgenticLoop:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
     ) -> tuple[str, list[dict[str, Any]]]:
-        response = await self.client.chat.completions.create(
+        response = await self._create_completion(
             model=self.model,
             messages=messages,
             tools=tools if tools else None,
@@ -93,7 +115,7 @@ class AgenticLoop:
         on_status: Callable[[str], Awaitable[None]] | None,
         on_chunk: Callable[[str], Awaitable[None]] | None,
     ) -> tuple[str, list[dict[str, Any]]]:
-        response_stream = await self.client.chat.completions.create(
+        response_stream = await self._create_completion(
             model=self.model,
             messages=messages,
             tools=tools if tools else None,

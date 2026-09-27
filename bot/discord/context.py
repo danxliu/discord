@@ -4,13 +4,10 @@ import discord
 
 from bot.discord.attachments import attachment_to_text
 from bot.discord.image import (
-    extract_image_urls_from_text_and_embeds,
-    extract_video_urls_from_text_and_embeds,
     format_turn_content,
     is_image_attachment,
     is_video_attachment,
     load_media_from_message,
-    merge_turn_contents,
 )
 
 
@@ -49,133 +46,54 @@ def extract_message_text(msg: discord.Message, include_attachments: bool = True)
     return "\n\n".join(parts).strip()
 
 
-async def get_channel_context_messages(
-    channel: discord.abc.Messageable,
+def _reaction_summary(msg: discord.Message) -> str:
+    reactions = getattr(msg, "reactions", None) or []
+    if not reactions:
+        return ""
+    summary = ", ".join(f"{reaction.emoji} {reaction.count}" for reaction in reactions)
+    return f"Reactions: {summary}"
+
+
+async def message_to_turn(
+    msg: discord.Message,
     client_user: discord.ClientUser | None,
-    limit: int = 10,
-    before: discord.Message | None = None,
-    exclude_message_id: int | None = None,
-    video_fallbacks: dict[str, list[dict[str, Any]]] | None = None,
-) -> list[dict[str, Any]]:
-    if limit <= 0 or not hasattr(channel, "history"):
-        return []
-
-    try:
-        kwargs: dict[str, object] = {"limit": limit}
-        if before:
-            kwargs["before"] = before
-        raw_messages: list[discord.Message] = []
-        async for msg in channel.history(**kwargs):
-            raw_messages.append(msg)
-        raw_messages.reverse()
-    except (discord.Forbidden, discord.HTTPException, AttributeError):
-        return []
-
-    client_id = client_user.id if client_user else None
-
-    valid_messages = [
-        msg
-        for msg in raw_messages
-        if not (exclude_message_id and msg.id == exclude_message_id)
-    ]
-
-    msg_image_parts: dict[int, list[dict[str, Any]]] = {}
-
-    media_messages = [
-        msg
-        for msg in valid_messages
-        if not (client_id and msg.author.id == client_id)
-        and (
-            any(
-                is_image_attachment(attachment) or is_video_attachment(attachment)
-                for attachment in msg.attachments
+    *,
+    text_override: str | None = None,
+    seen_urls: set[str] | None = None,
+) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
+    """Convert one Discord message to a role-tagged model turn with its media."""
+    text = clean_prompt(
+        text_override
+        if text_override is not None
+        else extract_message_text(msg, include_attachments=False),
+        client_user,
+    )
+    attachment_parts: list[str] = []
+    for attachment in msg.attachments:
+        if is_video_attachment(attachment):
+            attachment_parts.append(f"[Video attachment: {attachment.filename}]")
+        elif is_image_attachment(attachment):
+            attachment_parts.append(f"[Image attachment: {attachment.filename}]")
+        else:
+            try:
+                extracted = await attachment_to_text(attachment)
+            except Exception:
+                extracted = f"Could not read attachment {attachment.filename}."
+            attachment_parts.append(
+                f"[Attachment: {attachment.filename} ({attachment.url})]\n{extracted}"
             )
-            or extract_image_urls_from_text_and_embeds(msg.content, msg.embeds)
-            or extract_video_urls_from_text_and_embeds(msg.content, msg.embeds)
-        )
+
+    details = [
+        item for item in [text, *attachment_parts, _reaction_summary(msg)] if item
     ]
-    for msg in media_messages:
-        loaded, fallbacks = await load_media_from_message(msg)
-        if loaded:
-            msg_image_parts[msg.id] = loaded
-        if video_fallbacks is not None:
-            video_fallbacks.update(fallbacks)
-
-    text_attachment_items = [
-        (msg.id, att)
-        for msg in valid_messages
-        if not (client_id and msg.author.id == client_id)
-        for att in msg.attachments
-        if not (is_image_attachment(att) or is_video_attachment(att))
-    ]
-    extracted_attachment_texts: dict[int, list[str]] = {}
-    for msg_id, attachment in text_attachment_items:
-        content = await attachment_to_text(attachment)
-        note = f"Extracted attachment {attachment.filename}:\n{content}"
-        extracted_attachment_texts.setdefault(msg_id, []).append(note)
-
-    raw_turns: list[dict[str, Any]] = []
-
-    for msg in valid_messages:
-        images = msg_image_parts.get(msg.id, [])
-
-        if client_id and msg.author.id == client_id:
-            text = extract_message_text(msg)
-            if text == "*Thinking...*" or text.startswith("*Thinking"):
-                continue
-            raw_turns.append({"role": "assistant", "content": text})
-            continue
-
-        text = extract_message_text(msg, include_attachments=False)
-        att_notes = extracted_attachment_texts.get(msg.id, [])
-        if att_notes:
-            att_text = "\n\n".join(att_notes)
-            text = f"{text}\n\n{att_text}".strip() if text else att_text
-
-        if not text and not images:
-            continue
-        cleaned = clean_prompt(text, client_user)
-        if not cleaned and not images:
-            continue
-
-        # Include reply context in history if this message was a reply
-        reply_prefix = ""
-        if msg.reference:
-            ref_msg = (
-                msg.reference.resolved
-                if isinstance(msg.reference.resolved, discord.Message)
-                else msg.reference.cached_message
-            )
-            if isinstance(ref_msg, discord.Message):
-                ref_speaker = (
-                    "Assistant"
-                    if client_id and ref_msg.author.id == client_id
-                    else f"{ref_msg.author.display_name} (@{ref_msg.author.name})"
-                )
-                ref_snippet = clean_prompt(extract_message_text(ref_msg), client_user)
-                if len(ref_snippet) > 150:
-                    ref_snippet = ref_snippet[:147] + "..."
-                if ref_snippet:
-                    reply_prefix = f'(Replying to {ref_speaker}: "{ref_snippet}")\n'
-
-        if reply_prefix:
-            cleaned = f"{reply_prefix}{cleaned}".strip()
-
+    body = "\n\n".join(details)
+    images, fallbacks = await load_media_from_message(msg, seen_urls=seen_urls)
+    is_assistant = bool(client_user and msg.author.id == client_user.id)
+    if is_assistant:
+        role = "assistant"
+        turn_text = body
+    else:
+        role = "user"
         author_label = f"[{msg.author.display_name} (@{msg.author.name})]"
-        user_text = f"{author_label}: {cleaned}" if cleaned else author_label
-        turn_content = format_turn_content(user_text, images)
-        raw_turns.append({"role": "user", "content": turn_content})
-
-    while raw_turns and raw_turns[0]["role"] == "assistant":
-        raw_turns.pop(0)
-
-    merged_turns: list[dict[str, Any]] = []
-    for turn in raw_turns:
-        if merged_turns and merged_turns[-1]["role"] == turn["role"]:
-            merged_turns[-1]["content"] = merge_turn_contents(
-                merged_turns[-1]["content"], turn["content"]
-            )
-            continue
-        merged_turns.append(turn)
-
-    return merged_turns
+        turn_text = f"{author_label}: {body}" if body else author_label
+    return {"role": role, "content": format_turn_content(turn_text, images)}, fallbacks

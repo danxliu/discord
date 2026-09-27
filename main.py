@@ -101,6 +101,7 @@ agent_loop = AgenticLoop(
     base_url=settings.ai_base_url,
     model=settings.ai_model,
     tool_registry=tool_registry,
+    reasoning_effort=settings.ai_reasoning_effort,
     max_iterations=settings.ai_max_iterations,
     stream=settings.ai_stream_response,
 )

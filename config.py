@@ -10,11 +10,11 @@ class Settings(BaseSettings):
     ai_api_key: str
     ai_base_url: str = "https://openrouter.ai/api/v1"
     ai_model: str = "openai/gpt-4o"
+    ai_reasoning_effort: str = "medium"
     ai_image_model: str = ""
     giphy_api_key: str = ""
     ai_system_prompt_path: str = "prompts/system.md"
     ai_max_iterations: int = 10
-    ai_channel_history_limit: int = 10
     ai_stream_response: bool = True
     ai_stream_interval: float = 1.2
     log_level: str = "INFO"

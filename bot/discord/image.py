@@ -1,9 +1,7 @@
 import logging
-import re
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 import discord
 
@@ -16,7 +14,7 @@ from bot.utils.media import (
     fetch_web_resource,
     image_data_part,
 )
-from bot.utils.video import MAX_MEDIA_BYTES, is_animated_gif, is_video_media
+from bot.utils.video import MAX_MEDIA_BYTES, is_video_media
 
 is_video_unsupported_error = _video.is_video_unsupported_error
 replace_video_parts_with_fallbacks = _video.replace_video_parts_with_fallbacks
@@ -25,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
-URL_REGEX = re.compile(r"https?://[^\s<>\"'()]+")
 
 
 def detect_image_mime(
@@ -58,41 +55,6 @@ def is_video_attachment(attachment: discord.Attachment) -> bool:
     )
 
 
-def is_image_url(url: str) -> bool:
-    """Check if a URL points to an image based on its path extension."""
-    try:
-        parsed = urlparse(url)
-        path = parsed.path.lower()
-        return any(path.endswith(ext) for ext in IMAGE_EXTENSIONS)
-    except ValueError:
-        return False
-
-
-async def attachment_to_image_part(
-    attachment: discord.Attachment,
-) -> dict[str, Any] | None:
-    """Download a Discord attachment and convert it to an OpenAI multimodal image_url part."""
-    try:
-        data = await attachment.read()
-        if not data:
-            return None
-
-        mime = (
-            attachment.content_type.split(";")[0].strip().lower()
-            if attachment.content_type
-            else None
-        )
-        if not mime or not mime.startswith("image/"):
-            mime = detect_image_mime(
-                data, default="image/jpeg", filename_or_url=attachment.filename
-            )
-
-        return image_data_part(data, mime)
-    except Exception as e:
-        logger.warning("Failed to download attachment %s: %s", attachment.filename, e)
-        return None
-
-
 async def url_to_image_part(
     url: str,
 ) -> dict[str, Any] | None:
@@ -111,81 +73,11 @@ async def url_to_image_part(
         return None
 
 
-def extract_image_urls_from_text_and_embeds(
-    content: str,
-    embeds: Sequence[discord.Embed],
-    seen_urls: set[str] | None = None,
-) -> list[str]:
-    """Find image URLs inside message content text and Discord embeds."""
-    seen = seen_urls if seen_urls is not None else set()
-    found: list[str] = []
-
-    for embed in embeds:
-        for u in (
-            getattr(embed.image, "url", None),
-            getattr(embed.thumbnail, "url", None),
-        ):
-            if u and u not in seen:
-                seen.add(u)
-                found.append(u)
-
-    if content:
-        for raw_url in URL_REGEX.findall(content):
-            url = raw_url.rstrip(".,!?;:")
-            if is_image_url(url) and url not in seen:
-                seen.add(url)
-                found.append(url)
-
-    return found
-
-
-def extract_video_urls_from_text_and_embeds(
-    content: str,
-    embeds: Sequence[discord.Embed],
-    seen_urls: set[str] | None = None,
-) -> list[str]:
-    seen = seen_urls if seen_urls is not None else set()
-    embed_urls = [
-        url
-        for embed in embeds
-        if (url := getattr(embed.video, "url", None)) is not None
-    ]
-    embed_url_set = set(embed_urls)
-    candidates = list(embed_urls)
-    candidates.extend(URL_REGEX.findall(content or ""))
-    found: list[str] = []
-    extensions = {
-        ".mp4",
-        ".mov",
-        ".m4v",
-        ".webm",
-        ".mkv",
-        ".avi",
-        ".mpeg",
-        ".mpg",
-        ".gif",
-    }
-    for candidate in candidates:
-        if not candidate:
-            continue
-        url = candidate.rstrip(".,!?;:")
-        try:
-            suffix = Path(urlparse(url).path).suffix.lower()
-        except ValueError:
-            continue
-        if (suffix in extensions or url in embed_url_set) and url not in seen:
-            seen.add(url)
-            found.append(url)
-    return found
-
-
 def _media_result_parts(
     extracted: ExtractedContent,
 ) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
     parts = list(extracted.multimodal_content or [])
-    if not extracted.multimodal_content and extracted.text.startswith(
-        "Could not process"
-    ):
+    if not extracted.multimodal_content and extracted.text:
         parts.append({"type": "text", "text": extracted.text})
     return parts, extracted.video_fallbacks or {}
 
@@ -218,84 +110,52 @@ async def load_media_from_message(
                 logger.warning(
                     "Skipping oversized Discord media filename=%s", attachment.filename
                 )
-                if is_video_attachment(attachment):
-                    local_parts.append(
-                        {
-                            "type": "text",
-                            "text": (
-                                f"Video {attachment.filename} was not attached because it "
-                                "exceeds the 25 MB limit."
-                            ),
-                        }
-                    )
+                media_type = "Video" if is_video_attachment(attachment) else "Image"
+                local_parts.append(
+                    {
+                        "type": "text",
+                        "text": (
+                            f"{media_type} {attachment.filename} was not attached because it "
+                            "exceeds the 25 MB limit."
+                        ),
+                    }
+                )
                 return local_parts, local_fallbacks
 
             data = await attachment.read()
             if not data or len(data) > MAX_MEDIA_BYTES:
-                if is_video_attachment(attachment):
-                    local_parts.append(
-                        {
-                            "type": "text",
-                            "text": (
-                                f"Video {attachment.filename} was not attached because it "
-                                "is empty or exceeds the 25 MB limit."
-                            ),
-                        }
-                    )
+                media_type = "Video" if is_video_attachment(attachment) else "Image"
+                local_parts.append(
+                    {
+                        "type": "text",
+                        "text": (
+                            f"{media_type} {attachment.filename} was not attached because it "
+                            "is empty or exceeds the 25 MB limit."
+                        ),
+                    }
+                )
                 return local_parts, local_fallbacks
 
-            if is_video_attachment(attachment) or is_animated_gif(data):
-                extracted = await extract_media_resource(
-                    MediaResource(
-                        f"Discord attachment {attachment.filename}",
-                        getattr(attachment, "content_type", None) or "",
-                        None,
-                        data,
-                    )
+            extracted = await extract_media_resource(
+                MediaResource(
+                    f"Discord attachment {attachment.filename}",
+                    getattr(attachment, "content_type", None) or "",
+                    None,
+                    data,
                 )
-                extracted_parts, extracted_fallbacks = _media_result_parts(extracted)
-                local_parts.extend(extracted_parts)
-                local_fallbacks.update(extracted_fallbacks)
-            else:
-                local_parts.append(
-                    image_data_part(
-                        data,
-                        detect_image_mime(data, filename_or_url=attachment.filename),
-                    )
-                )
+            )
+            extracted_parts, extracted_fallbacks = _media_result_parts(extracted)
+            local_parts.extend(extracted_parts)
+            local_fallbacks.update(extracted_fallbacks)
         except Exception:
             logger.exception(
                 "Failed to load Discord media filename=%s", attachment.filename
             )
-            if is_video_attachment(attachment):
-                local_parts.append(
-                    {
-                        "type": "text",
-                        "text": f"Video {attachment.filename} could not be processed.",
-                    }
-                )
-        return local_parts, local_fallbacks
-
-    video_urls = extract_video_urls_from_text_and_embeds(msg.content, msg.embeds, seen)
-    image_urls = extract_image_urls_from_text_and_embeds(msg.content, msg.embeds, seen)
-
-    async def _process_video_url(
-        url: str,
-    ) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
-        local_parts: list[dict[str, Any]] = []
-        local_fallbacks: dict[str, list[dict[str, Any]]] = {}
-        try:
-            resource = await fetch_web_resource(url, max_bytes=MAX_MEDIA_BYTES)
-            extracted = await extract_media_resource(resource)
-            extracted_parts, extracted_fallbacks = _media_result_parts(extracted)
-            local_parts.extend(extracted_parts)
-            local_fallbacks.update(extracted_fallbacks)
-        except Exception as error:
-            logger.warning("Failed to load linked video URL=%s error=%s", url, error)
+            media_type = "Video" if is_video_attachment(attachment) else "Image"
             local_parts.append(
                 {
                     "type": "text",
-                    "text": f"Linked video {url} could not be loaded: {error}",
+                    "text": f"{media_type} {attachment.filename} could not be processed.",
                 }
             )
         return local_parts, local_fallbacks
@@ -304,15 +164,6 @@ async def load_media_from_message(
         attachment_parts, attachment_fallbacks = await _process_attachment(attachment)
         parts.extend(attachment_parts)
         fallbacks.update(attachment_fallbacks)
-
-    for url in image_urls:
-        if part := await url_to_image_part(url):
-            parts.append(part)
-
-    for url in video_urls:
-        video_parts, video_fallbacks = await _process_video_url(url)
-        parts.extend(video_parts)
-        fallbacks.update(video_fallbacks)
 
     return parts, fallbacks
 
