@@ -18,6 +18,7 @@ from bot.discord.server_status import (
 from bot.memory import UserMemory
 from bot.net import close_public_session
 from bot.tools import (
+    DiscordContextTool,
     DiscordHistorySearchTool,
     DiscordReactionAddTool,
     DiscordThreadCreateTool,
@@ -87,6 +88,7 @@ tool_registry.register(MemoryAddTool(user_memory))
 tool_registry.register(MemoryRemoveTool(user_memory))
 tool_registry.register(DiscordThreadCreateTool(client))
 tool_registry.register(DiscordReactionAddTool(client))
+tool_registry.register(DiscordContextTool(client))
 tool_registry.register(DiscordHistorySearchTool(client))
 register_image_gen_tool(
     tool_registry,

@@ -30,6 +30,8 @@ def build_system_prompt(
     channel: discord.abc.Messageable,
     guild: discord.Guild | None = None,
     tool_registry: ToolRegistry | None = None,
+    triggering_message_id: int | None = None,
+    referenced_message_id: int | None = None,
 ) -> str:
     base_prompt = _get_base_prompt(prompt_path)
 
@@ -71,13 +73,20 @@ def build_system_prompt(
         speaker_info = f"User: {user.display_name} (@{user.name}, ID: {user.id})"
         emoji_section = "No custom server emojis (DM)."
 
-    context_section = (
-        f"## Current Context\n"
-        f"- Date/Time: {now_utc}\n"
-        f"- {environment_info}\n"
-        f"- {channel_info}\n"
-        f"- {speaker_info}\n"
-        f"- {emoji_section}"
-    )
+    context_lines = [
+        f"- Date/Time: {now_utc}",
+        f"- {environment_info}",
+        f"- {channel_info}",
+        f"- {speaker_info}",
+    ]
+    if triggering_message_id is not None:
+        context_lines.append(f"- Triggering Message ID: {triggering_message_id}")
+    if referenced_message_id is not None:
+        context_lines.append(
+            f"- Referenced Message ID (reply target): {referenced_message_id}"
+        )
+    context_lines.append(f"- {emoji_section}")
+
+    context_section = "## Current Context\n" + "\n".join(context_lines)
 
     return f"{base_prompt}\n\n{tool_section}\n\n{context_section}"

@@ -66,6 +66,106 @@ class DiscordTool(BaseTool):
             return "Error: Discord denied that action; the bot may be missing channel permissions."
         return "Error: Discord could not complete the request. Please try again later."
 
+    MAX_MESSAGE_TEXT = 2000
+    MAX_ATTACHMENT_TEXT = 1200
+
+    async def _describe_messages(
+        self,
+        messages: list[Any],
+        context: ToolContext,
+        *,
+        query: str | None = None,
+        max_results: int = 10,
+        heading: str | None = None,
+    ) -> str | ToolResult:
+        lines: list[str] = []
+        multimodal: list[dict[str, Any]] = []
+        video_fallbacks: dict[str, list[dict[str, Any]]] = {}
+        seen_urls: set[str] = set()
+
+        for message in messages[:max_results]:
+            text = extract_message_text(message, include_attachments=False)
+            attachment_notes: list[str] = []
+            for attachment in message.attachments:
+                if is_video_attachment(attachment):
+                    attachment_notes.append(
+                        f"[Video attachment: {attachment.filename}]"
+                    )
+                elif is_image_attachment(attachment):
+                    attachment_notes.append(
+                        f"[Image attachment: {attachment.filename}]"
+                    )
+                else:
+                    try:
+                        extracted = await attachment_to_text(
+                            attachment, max_chars=self.MAX_ATTACHMENT_TEXT
+                        )
+                    except Exception:
+                        extracted = f"Could not read attachment {attachment.filename}."
+                    attachment_notes.append(
+                        f"[Attachment: {attachment.filename} ({attachment.url})]\n{extracted}"
+                    )
+            if attachment_notes:
+                text = "\n\n".join([part for part in [text, *attachment_notes] if part])
+
+            reactions = getattr(message, "reactions", None) or []
+            if reactions:
+                text = "\n\n".join(
+                    [
+                        part
+                        for part in [
+                            text,
+                            "Reactions: "
+                            + ", ".join(
+                                f"{reaction.emoji} {reaction.count}"
+                                for reaction in reactions
+                            ),
+                        ]
+                        if part
+                    ]
+                )
+
+            if query and query.casefold() not in text.casefold():
+                continue
+            if len(text) > self.MAX_MESSAGE_TEXT:
+                text = text[: self.MAX_MESSAGE_TEXT - 3] + "..."
+
+            author = getattr(message.author, "display_name", message.author.name)
+            timestamp = getattr(message, "created_at", None)
+            timestamp_text = timestamp.isoformat() if timestamp else "unknown time"
+            lines.append(
+                f"Message {message.id} by {author} at {timestamp_text}:\n{text or '[No text content]'}"
+            )
+
+            media_parts, fallbacks = await load_media_from_message(
+                message, seen_urls=seen_urls
+            )
+            video_fallbacks.update(fallbacks)
+            if media_parts:
+                multimodal.append(
+                    {
+                        "type": "text",
+                        "text": f"Media attached to message {message.id} by {author}.",
+                    }
+                )
+                multimodal.extend(media_parts)
+
+        if not lines:
+            if query:
+                return f"No recent messages matched '{query}' in this channel."
+            return "No messages were found in that relative window."
+
+        if heading is None:
+            heading = (
+                f"Found {len(lines)} recent match(es) for '{query}':"
+                if query
+                else f"Found {len(lines)} message(s) relative to the invoking message:"
+            )
+        result_text = heading + "\n\n" + "\n\n".join(lines)
+        if multimodal:
+            return ToolResult(result_text, multimodal, video_fallbacks)
+        return result_text
+
 
 class DiscordReactionAddTool(DiscordTool):
     @property
@@ -192,6 +292,126 @@ class DiscordThreadCreateTool(DiscordTool):
         return f"Created thread **{thread.name}**: {link} (ID: {thread.id})."
 
 
+class DiscordContextTool(DiscordTool):
+    MAX_RESULTS = 25
+    DEFAULT_COUNT = 10
+
+    @property
+    def name(self) -> str:
+        return "discord_context"
+
+    @property
+    def display_name(self) -> str:
+        return "Read Discord Context"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Read recent messages and conversation history from the current channel. "
+            "Use this tool whenever you need background context, want to see what users were talking about, "
+            "or need details from recent channel activity."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "count": {
+                    "type": "integer",
+                    "description": "Number of recent messages to retrieve (1 to 25, default: 10)",
+                },
+                "direction": {
+                    "type": "string",
+                    "enum": ["before", "after", "around"],
+                    "description": "Direction relative to the message (default: before)",
+                },
+                "message_id": {
+                    "type": "integer",
+                    "description": "Optional message ID to read context relative to; defaults to the invoking message",
+                },
+            },
+            "required": [],
+        }
+
+    async def execute(
+        self,
+        context: ToolContext,
+        count: int = DEFAULT_COUNT,
+        direction: str = "before",
+        message_id: int | str | None = None,
+        **kwargs: Any,
+    ) -> str | ToolResult:
+        if not isinstance(direction, str) or direction not in {
+            "before",
+            "after",
+            "around",
+        }:
+            return "Error: Direction must be 'before', 'after', or 'around'."
+        try:
+            count = int(count)
+        except (TypeError, ValueError):
+            return f"Error: Count must be an integer from 1 to {self.MAX_RESULTS}."
+        if not 1 <= count <= self.MAX_RESULTS:
+            return f"Error: Count must be from 1 to {self.MAX_RESULTS}."
+
+        target_message_id = (
+            message_id if message_id is not None else context.triggering_message_id
+        )
+        if target_message_id is None:
+            return "Error: Reading channel context requires a target or invoking message."
+
+        try:
+            channel = await self._get_channel(context)
+            if channel is None:
+                return "Error: The current channel could not be resolved."
+            if not hasattr(channel, "history"):
+                return "Error: This channel does not support message history."
+
+            anchor, error = await self._get_message(context, channel, target_message_id)
+            if error:
+                return error
+
+            before_count = count if direction == "before" else 0
+            after_count = count if direction == "after" else 0
+            if direction == "around":
+                before_count = (count + 1) // 2
+                after_count = count // 2
+
+            messages: list[Any] = []
+            if before_count:
+                previous = [
+                    item
+                    async for item in channel.history(limit=before_count, before=anchor)
+                ]
+                messages.extend(reversed(previous))
+            if after_count:
+                following = [
+                    item
+                    async for item in channel.history(
+                        limit=after_count, after=anchor, oldest_first=True
+                    )
+                ]
+                messages.extend(following)
+
+            if not messages:
+                return "No messages were found in that relative window."
+
+            return await self._describe_messages(
+                messages,
+                context,
+                max_results=self.MAX_RESULTS,
+                heading=f"Retrieved {len(messages)} recent message(s) from channel context:",
+            )
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as error:
+            self._log_discord_error(context, self.name)
+            if isinstance(error, discord.Forbidden):
+                return "Error: Discord denied access to this channel's message history."
+            if isinstance(error, discord.NotFound):
+                return "Error: Discord could not find the channel or message."
+            return "Error: Discord could not read this channel's history. Please try again later."
+
+
 class DiscordHistorySearchTool(DiscordTool):
     MAX_SCAN_MESSAGES = 500
     MAX_RESULTS = 10
@@ -278,100 +498,6 @@ class DiscordHistorySearchTool(DiscordTool):
             ]
             messages.extend(following)
         return messages
-
-    async def _describe_messages(
-        self,
-        messages: list[Any],
-        context: ToolContext,
-        *,
-        query: str | None = None,
-    ) -> str | ToolResult:
-        lines: list[str] = []
-        multimodal: list[dict[str, Any]] = []
-        video_fallbacks: dict[str, list[dict[str, Any]]] = {}
-        seen_urls: set[str] = set()
-
-        for message in messages[: self.MAX_RESULTS]:
-            text = extract_message_text(message, include_attachments=False)
-            attachment_notes: list[str] = []
-            for attachment in message.attachments:
-                if is_video_attachment(attachment):
-                    attachment_notes.append(
-                        f"[Video attachment: {attachment.filename}]"
-                    )
-                elif is_image_attachment(attachment):
-                    attachment_notes.append(
-                        f"[Image attachment: {attachment.filename}]"
-                    )
-                else:
-                    try:
-                        extracted = await attachment_to_text(
-                            attachment, max_chars=self.MAX_ATTACHMENT_TEXT
-                        )
-                    except Exception:
-                        extracted = f"Could not read attachment {attachment.filename}."
-                    attachment_notes.append(
-                        f"[Attachment: {attachment.filename} ({attachment.url})]\n{extracted}"
-                    )
-            if attachment_notes:
-                text = "\n\n".join([part for part in [text, *attachment_notes] if part])
-
-            reactions = getattr(message, "reactions", None) or []
-            if reactions:
-                text = "\n\n".join(
-                    [
-                        part
-                        for part in [
-                            text,
-                            "Reactions: "
-                            + ", ".join(
-                                f"{reaction.emoji} {reaction.count}"
-                                for reaction in reactions
-                            ),
-                        ]
-                        if part
-                    ]
-                )
-
-            if query and query.casefold() not in text.casefold():
-                continue
-            if len(text) > self.MAX_MESSAGE_TEXT:
-                text = text[: self.MAX_MESSAGE_TEXT - 3] + "..."
-
-            author = getattr(message.author, "display_name", message.author.name)
-            timestamp = getattr(message, "created_at", None)
-            timestamp_text = timestamp.isoformat() if timestamp else "unknown time"
-            lines.append(
-                f"Message {message.id} by {author} at {timestamp_text}:\n{text or '[No text content]'}"
-            )
-
-            media_parts, fallbacks = await load_media_from_message(
-                message, seen_urls=seen_urls
-            )
-            video_fallbacks.update(fallbacks)
-            if media_parts:
-                multimodal.append(
-                    {
-                        "type": "text",
-                        "text": f"Media attached to message {message.id} by {author}.",
-                    }
-                )
-                multimodal.extend(media_parts)
-
-        if not lines:
-            if query:
-                return f"No recent messages matched '{query}' in this channel."
-            return "No messages were found in that relative window."
-
-        heading = (
-            f"Found {len(lines)} recent match(es) for '{query}':"
-            if query
-            else f"Found {len(lines)} message(s) relative to the invoking message:"
-        )
-        result_text = heading + "\n\n" + "\n\n".join(lines)
-        if multimodal:
-            return ToolResult(result_text, multimodal, video_fallbacks)
-        return result_text
 
     async def execute(
         self,

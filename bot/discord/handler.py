@@ -169,8 +169,9 @@ async def _build_chat_request(
     agent_loop: AgenticLoop,
     context_turns: list[dict[str, Any]],
     triggering_message_id: int | None,
-    generation_image_parts: list[dict[str, Any]] | None,
-    video_fallbacks: dict[str, list[dict[str, Any]]] | None,
+    referenced_message_id: int | None = None,
+    generation_image_parts: list[dict[str, Any]] | None = None,
+    video_fallbacks: dict[str, list[dict[str, Any]]] | None = None,
 ) -> tuple[list[dict[str, Any]], ToolContext]:
     channel_id = getattr(channel, "id", user.id)
     system_prompt = build_system_prompt(
@@ -179,6 +180,8 @@ async def _build_chat_request(
         channel,
         guild,
         tool_registry=agent_loop.tool_registry,
+        triggering_message_id=triggering_message_id,
+        referenced_message_id=referenced_message_id,
     )
     turns = list(context_turns)
 
@@ -203,6 +206,7 @@ async def _build_chat_request(
         ),
         guild_id=guild.id if guild else None,
         triggering_message_id=triggering_message_id,
+        referenced_message_id=referenced_message_id,
         request_id=request_id,
         image_count=image_count,
         current_image_parts=list(generation_image_parts or []),
@@ -245,6 +249,7 @@ async def _execute_chat_pipeline(
     on_fallback_send: Callable[[list[str]], Awaitable[None]] | None = None,
     context_turns: list[dict[str, Any]] | None = None,
     triggering_message_id: int | None = None,
+    referenced_message_id: int | None = None,
     generation_image_parts: list[dict[str, Any]] | None = None,
     video_fallbacks: dict[str, list[dict[str, Any]]] | None = None,
     on_generated_images: Callable[[list[GeneratedImage]], Awaitable[None]]
@@ -259,6 +264,7 @@ async def _execute_chat_pipeline(
         agent_loop,
         context_turns or [],
         triggering_message_id,
+        referenced_message_id,
         generation_image_parts,
         video_fallbacks,
     )
@@ -318,19 +324,8 @@ async def handle_message_event(
         len(message.attachments),
     )
     is_reply = bool(message.reference and message.reference.message_id)
-    is_mention_trigger = client_user in message.mentions
-    ref_message = (
-        await get_referenced_message(message)
-        if is_reply and not is_mention_trigger
-        else None
-    )
-    reply_context_message = (
-        ref_message
-        if not is_mention_trigger
-        and ref_message
-        and ref_message.author.id == client_user.id
-        else None
-    )
+    referenced_message_id = message.reference.message_id if is_reply else None
+    ref_message = await get_referenced_message(message) if is_reply else None
 
     prompt = clean_prompt(
         extract_message_text(message, include_attachments=False), client_user
@@ -353,9 +348,16 @@ async def handle_message_event(
         elif is_reply:
             prompt = (
                 "Please respond to the referenced message."
-                if reply_context_message
+                if ref_message
                 else "Please respond to this message."
             )
+
+    if ref_message:
+        reply_turn, reply_fallbacks = await message_to_turn(
+            ref_message, client_user, seen_urls=seen_urls
+        )
+        context_turns.append(reply_turn)
+        video_fallbacks.update(reply_fallbacks)
 
     current_turn, current_fallbacks = await message_to_turn(
         message,
@@ -364,12 +366,6 @@ async def handle_message_event(
         seen_urls=seen_urls,
     )
     video_fallbacks.update(current_fallbacks)
-    if reply_context_message:
-        reply_turn, reply_fallbacks = await message_to_turn(
-            reply_context_message, client_user, seen_urls=seen_urls
-        )
-        context_turns.append(reply_turn)
-        video_fallbacks.update(reply_fallbacks)
     context_turns.append(current_turn)
     current_media_parts = (
         current_turn["content"] if isinstance(current_turn["content"], list) else []
@@ -439,6 +435,7 @@ async def handle_message_event(
         on_fallback_send=on_fallback_send,
         context_turns=context_turns,
         triggering_message_id=message.id,
+        referenced_message_id=referenced_message_id,
         generation_image_parts=generation_image_parts,
         video_fallbacks=video_fallbacks,
         on_generated_images=on_generated_images,

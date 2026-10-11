@@ -6,6 +6,7 @@ from bot.tools.base import (
     ToolResult,
 )
 from bot.tools.discord import (
+    DiscordContextTool,
     DiscordHistorySearchTool,
     DiscordReactionAddTool,
     DiscordThreadCreateTool,
@@ -33,5 +34,6 @@ __all__ = [
     "MemoryRemoveTool",
     "DiscordThreadCreateTool",
     "DiscordReactionAddTool",
+    "DiscordContextTool",
     "DiscordHistorySearchTool",
 ]

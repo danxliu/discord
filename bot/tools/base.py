@@ -36,6 +36,7 @@ class ToolContext:
     user_avatar_url: str | None = None
     user_status: str | None = None
     triggering_message_id: int | None = None
+    referenced_message_id: int | None = None
 
 
 class BaseTool(ABC):
