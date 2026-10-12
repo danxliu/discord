@@ -1,7 +1,14 @@
+import ssl
+
 import aiohttp
+import certifi
 from pydantic import BaseModel
 
 from config import settings
+
+
+class PelicanAPIError(RuntimeError):
+    """Raised when an error response is returned by the Pelican panel API."""
 
 
 class ServerInfo(BaseModel):
@@ -25,7 +32,9 @@ async def get_session() -> aiohttp.ClientSession:
     global _session
     if _session is None or _session.closed:
         timeout = aiohttp.ClientTimeout(total=15)
-        _session = aiohttp.ClientSession(timeout=timeout)
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        _session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     return _session
 
 
@@ -63,7 +72,7 @@ async def get_servers(
                 )
             return servers
         else:
-            raise Exception(f"Application API Error: {response.status}")
+            raise PelicanAPIError(f"Application API Error: {response.status}")
 
 
 def format_bytes(b: int) -> str:
@@ -112,7 +121,7 @@ async def get_server_stats(
                 disk=format_bytes(disk_bytes),
             )
         else:
-            raise Exception(f"Client API Error: {response.status}")
+            raise PelicanAPIError(f"Client API Error: {response.status}")
 
 
 async def send_power_action(
@@ -135,4 +144,4 @@ async def send_power_action(
     client_session = session or await get_session()
     async with client_session.post(url, headers=headers, json=payload) as response:
         if response.status != 204:
-            raise Exception(f"Power API Error: {response.status}")
+            raise PelicanAPIError(f"Power API Error: {response.status}")

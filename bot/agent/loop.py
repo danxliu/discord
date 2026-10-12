@@ -97,14 +97,14 @@ class AgenticLoop:
         msg = response.choices[0].message
         tool_calls = [
             {
-                "id": tc.id,
+                "id": tc.id or f"call_{i}_{tc.function.name}",
                 "type": tc.type,
                 "function": {
                     "name": tc.function.name,
                     "arguments": tc.function.arguments,
                 },
             }
-            for tc in (msg.tool_calls or [])
+            for i, tc in enumerate(msg.tool_calls or [])
         ]
         return msg.content or "", tool_calls
 
@@ -144,9 +144,13 @@ class AgenticLoop:
 
         await sanitizer.flush()
 
-        tool_calls = [
-            accumulated_tool_calls[i] for i in sorted(accumulated_tool_calls.keys())
-        ]
+        tool_calls = []
+        for i in sorted(accumulated_tool_calls.keys()):
+            tc = accumulated_tool_calls[i]
+            if not tc["id"]:
+                fn_name = tc.get("function", {}).get("name") or "tool"
+                tc["id"] = f"call_{i}_{fn_name}"
+            tool_calls.append(tc)
         return "".join(content_pieces), tool_calls
 
     def _parse_tool_arguments(self, raw_args: Any) -> dict[str, Any]:
@@ -307,7 +311,7 @@ class AgenticLoop:
             current_messages.append(
                 {
                     "role": "assistant",
-                    "content": content,
+                    "content": content or None,
                     "tool_calls": tool_calls,
                 }
             )

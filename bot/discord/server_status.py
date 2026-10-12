@@ -140,8 +140,8 @@ class StatusUpdater:
                 logger.exception(
                     "Failed to delete expired status message id=%s", message_id
                 )
-                continue
-            self.active_messages.pop(message_id, None)
+            finally:
+                self.active_messages.pop(message_id, None)
 
     async def _refresh_messages(self, now: float) -> None:
         servers = {
@@ -161,8 +161,12 @@ class StatusUpdater:
             result = stats_by_id.get(data.server_info.identifier)
             embed = render_server_embed(data.server_info, result, data.expires_at, now)
             try:
-                view = ServerControlView(
-                    data.server_info.identifier, data.server_info.name
+                view = (
+                    None
+                    if isinstance(result, Exception)
+                    else ServerControlView(
+                        data.server_info.identifier, data.server_info.name
+                    )
                 )
                 await data.message.edit(embed=embed, view=view)
             except discord.NotFound:

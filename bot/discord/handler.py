@@ -41,7 +41,11 @@ async def _deliver_generated_images(
             )
     finally:
         for file in files:
-            file.close()
+            try:
+                if getattr(file, "fp", None) and hasattr(file.fp, "close"):
+                    file.fp.close()
+            finally:
+                file.close()
 
 
 async def _run_agent_with_image_fallback(

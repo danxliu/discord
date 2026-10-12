@@ -159,10 +159,15 @@ def prepare_image_for_model(
 
     try:
         with Image.open(BytesIO(data)) as img:
+            orig_format = img.format
             try:
-                img = ImageOps.exif_transpose(img)
+                transposed = ImageOps.exif_transpose(img)
+                if transposed is not None:
+                    img = transposed
             except Exception:
                 pass
+            if img.format is None:
+                img.format = orig_format
 
             if getattr(img, "is_animated", False):
                 try:
@@ -214,6 +219,27 @@ def image_data_part(
         "type": "image_url",
         "image_url": {"url": f"data:{final_mime};base64,{encoded}"},
     }
+
+
+async def url_to_image_part(
+    url: str,
+    *,
+    timeout_seconds: float = 10,
+    max_bytes: int = MAX_MEDIA_BYTES,
+) -> dict[str, Any] | None:
+    """Download a public image URL and convert it to an image content part."""
+    try:
+        resource = await fetch_web_resource(
+            url, timeout_seconds=timeout_seconds, max_bytes=max_bytes
+        )
+        mime = detect_image_mime(resource.data, filename_or_url=url, default="")
+        if not mime or not mime.startswith("image/"):
+            logger.warning("URL %s did not return a supported image", url)
+            return None
+        return image_data_part(resource.data, mime)
+    except Exception as e:
+        logger.warning("Failed to download image URL %s: %s", url, e)
+        return None
 
 
 def _media_type(resource: MediaResource) -> str:

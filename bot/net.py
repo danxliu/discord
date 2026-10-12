@@ -9,10 +9,15 @@ import certifi
 
 class PublicResolver(aiohttp.abc.AbstractResolver):
     def __init__(self) -> None:
-        self._resolver = aiohttp.resolver.DefaultResolver()
+        self._resolver: aiohttp.resolver.DefaultResolver | None = None
+
+    def _get_resolver(self) -> aiohttp.resolver.DefaultResolver:
+        if self._resolver is None:
+            self._resolver = aiohttp.resolver.DefaultResolver()
+        return self._resolver
 
     async def resolve(self, host: str, port: int = 0, family: int = socket.AF_INET):
-        records = await self._resolver.resolve(host, port, family)
+        records = await self._get_resolver().resolve(host, port, family)
         if not records or any(
             not ipaddress.ip_address(record["host"]).is_global for record in records
         ):
@@ -20,7 +25,19 @@ class PublicResolver(aiohttp.abc.AbstractResolver):
         return records
 
     async def close(self) -> None:
-        await self._resolver.close()
+        if self._resolver is not None:
+            await self._resolver.close()
+            self._resolver = None
+
+
+BLOCKED_HOSTNAMES = {"localhost", "localhost.localdomain"}
+BLOCKED_HOSTNAME_SUFFIXES = (
+    ".local",
+    ".internal",
+    ".lan",
+    ".home.arpa",
+    ".localdomain",
+)
 
 
 def is_public_url(url: str) -> bool:
@@ -35,8 +52,13 @@ def is_public_url(url: str) -> bool:
         or parsed.password
     ):
         return False
+
+    hostname = parsed.hostname.lower()
+    if hostname in BLOCKED_HOSTNAMES or hostname.endswith(BLOCKED_HOSTNAME_SUFFIXES):
+        return False
+
     try:
-        address = ipaddress.ip_address(parsed.hostname)
+        address = ipaddress.ip_address(hostname)
     except ValueError:
         return True
     return address.is_global

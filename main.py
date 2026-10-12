@@ -8,11 +8,7 @@ import pelican
 from bot.agent import AgenticLoop
 from bot.discord import handle_message_event
 from bot.discord.server_status import (
-    ActiveStatusMessage,
-    ServerControlView,
-    StatusUpdater,
     register_server_commands,
-    render_server_embed,
     status_updater,
 )
 from bot.memory import UserMemory
@@ -34,17 +30,6 @@ from bot.tools import (
 from config import settings
 
 logger = logging.getLogger(__name__)
-
-__all__ = [
-    "ActiveStatusMessage",
-    "Client",
-    "ServerControlView",
-    "StatusUpdater",
-    "ping",
-    "render_server_embed",
-    "servers",
-    "status_updater",
-]
 
 
 class Client(discord.Client):

@@ -2,6 +2,7 @@ import logging
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import discord
 
@@ -11,8 +12,6 @@ from bot.utils.media import (
     ExtractedContent,
     MediaResource,
     extract_media_resource,
-    fetch_web_resource,
-    image_data_part,
 )
 from bot.utils.video import MAX_MEDIA_BYTES, is_video_media
 
@@ -21,8 +20,30 @@ replace_video_parts_with_fallbacks = _video.replace_video_parts_with_fallbacks
 
 logger = logging.getLogger(__name__)
 
-
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+DISCORD_CDN_HOSTS = {"cdn.discordapp.com", "media.discordapp.net"}
+
+
+def is_discord_attachment_url(url: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+        return (
+            parsed.scheme in {"http", "https"}
+            and parsed.hostname in DISCORD_CDN_HOSTS
+            and parsed.path.startswith("/attachments/")
+        )
+    except Exception:
+        return False
+
+
+def canonical_attachment_url(url: str) -> str:
+    if not is_discord_attachment_url(url):
+        return url
+    try:
+        parsed = urlsplit(url)
+        return urlunsplit(("https", "cdn.discordapp.com", parsed.path, "", ""))
+    except Exception:
+        return url
 
 
 def detect_image_mime(
@@ -55,22 +76,8 @@ def is_video_attachment(attachment: discord.Attachment) -> bool:
     )
 
 
-async def url_to_image_part(
-    url: str,
-) -> dict[str, Any] | None:
-    """Download a public image URL and convert it to an image content part."""
-    try:
-        resource = await fetch_web_resource(
-            url, timeout_seconds=10, max_bytes=MAX_MEDIA_BYTES
-        )
-        mime = detect_image_mime(resource.data, filename_or_url=url, default="")
-        if not mime or not mime.startswith("image/"):
-            logger.warning("URL %s did not return a supported image", url)
-            return None
-        return image_data_part(resource.data, mime)
-    except Exception as e:
-        logger.warning("Failed to download image URL %s: %s", url, e)
-        return None
+fetch_web_resource = _media.fetch_web_resource
+url_to_image_part = _media.url_to_image_part
 
 
 def _media_result_parts(
@@ -91,14 +98,14 @@ async def load_media_from_message(
     parts: list[dict[str, Any]] = []
     fallbacks: dict[str, list[dict[str, Any]]] = {}
 
-    target_attachments = [
-        att
-        for att in msg.attachments
-        if att.url not in seen
-        and (is_image_attachment(att) or is_video_attachment(att))
-    ]
-    for att in target_attachments:
-        seen.add(att.url)
+    target_attachments: list[discord.Attachment] = []
+    for att in msg.attachments:
+        canon_url = canonical_attachment_url(att.url)
+        if canon_url not in seen and (
+            is_image_attachment(att) or is_video_attachment(att)
+        ):
+            seen.add(canon_url)
+            target_attachments.append(att)
 
     async def _process_attachment(
         attachment: discord.Attachment,
@@ -168,14 +175,6 @@ async def load_media_from_message(
     return parts, fallbacks
 
 
-async def load_images_from_message(
-    msg: discord.Message,
-    seen_urls: set[str] | None = None,
-) -> list[dict[str, Any]]:
-    parts, _ = await load_media_from_message(msg, seen_urls)
-    return [part for part in parts if part.get("type") == "image_url"]
-
-
 def format_turn_content(
     text: str,
     image_parts: Sequence[dict[str, Any]] | None = None,
@@ -188,42 +187,6 @@ def format_turn_content(
         parts.append({"type": "text", "text": text})
     parts.extend(image_parts)
     return parts
-
-
-def merge_turn_contents(
-    c1: str | list[dict[str, Any]],
-    c2: str | list[dict[str, Any]],
-) -> str | list[dict[str, Any]]:
-    """Merge two turn contents cleanly, preserving both text and images."""
-    if isinstance(c1, str) and isinstance(c2, str):
-        return f"{c1}\n\n{c2}"
-
-    t1 = (
-        c1
-        if isinstance(c1, str)
-        else "\n".join(p["text"] for p in c1 if p.get("type") == "text")
-    )
-    imgs1 = (
-        []
-        if isinstance(c1, str)
-        else [p for p in c1 if p.get("type") in {"image_url", "video_url"}]
-    )
-
-    t2 = (
-        c2
-        if isinstance(c2, str)
-        else "\n".join(p["text"] for p in c2 if p.get("type") == "text")
-    )
-    imgs2 = (
-        []
-        if isinstance(c2, str)
-        else [p for p in c2 if p.get("type") in {"image_url", "video_url"}]
-    )
-
-    combined_text = f"{t1}\n\n{t2}".strip() if t1 and t2 else (t1 or t2)
-    combined_images = imgs1 + imgs2
-
-    return format_turn_content(combined_text, combined_images)
 
 
 def to_text_summary(content: str | list[dict[str, Any]]) -> str:

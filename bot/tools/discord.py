@@ -359,7 +359,9 @@ class DiscordContextTool(DiscordTool):
             message_id if message_id is not None else context.triggering_message_id
         )
         if target_message_id is None:
-            return "Error: Reading channel context requires a target or invoking message."
+            return (
+                "Error: Reading channel context requires a target or invoking message."
+            )
 
         try:
             channel = await self._get_channel(context)

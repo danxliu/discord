@@ -9,7 +9,6 @@ from openai import AsyncOpenAI
 from openai.types.images_response import ImagesResponse
 from PIL import Image
 
-from bot.discord.image import url_to_image_part
 from bot.tools.base import (
     BaseTool,
     GeneratedImage,
@@ -17,7 +16,11 @@ from bot.tools.base import (
     ToolRegistry,
     ToolResult,
 )
-from bot.utils.media import detect_image_mime, prepare_image_for_model
+from bot.utils.media import (
+    detect_image_mime,
+    prepare_image_for_model,
+    url_to_image_part,
+)
 
 logger = logging.getLogger(__name__)
 
